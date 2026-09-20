@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v1.0.5] - 2026-09-20
+
+### Fixed
+- **Upload Engine Loop & Daemon Resilience**:
+  - Moved `try/catch` inside `while (!ct.IsCancellationRequested)` loop in `UploadEngine.LoopAsync`, preventing an unhandled batch error from permanently killing scheduled automated uploads.
+  - Stripped `FileAttributes.ReadOnly` before deleting source and target files in `UploadEngine.MoveToDoneAsync`, resolving cross-volume move failures on photos imported with read-only flags from camera SD cards.
+  - Expanded retry catch block in `MoveToDoneAsync` to catch `UnauthorizedAccessException` alongside `IOException`.
+- **Database & Queue Concurrency**:
+  - Eliminated TOCTOU unlock window in `UploadQueue.TryEnqueueAsync` during rename handling, keeping checks and updates under the SQLite lock.
+  - Prevented in-flight uploads (`status = 'Uploading'`) from being mutated back to `'Pending'` upon rename detection, eliminating duplicate concurrent upload executions.
+  - Refined transient lock handling during hashing: `UnauthorizedAccessException` on existing files throws `IOException` to trigger settle loop retry rather than permanently dropping the file.
+- **File Watcher & Intake Hardening**:
+  - Protected `FileWatcherService.Note` handler with a global `try/catch` block, preventing unhandled exceptions on thread pool callbacks from crashing the host process.
+  - Sanitized `FileWatcherService.IsUnderDoneFolder` against malformed path exceptions.
+  - Added reparse point (`FileAttributes.ReparsePoint`) check in `InitialScanAsync` to skip directory junctions/symlinks and prevent recursive traversal loops.
+- **UI & Configuration**:
+  - Disallowed `DoneFolder` from being configured as an ancestor of `WatchFolder` in `MainWindow.Save_Click`, preventing silent intake suppression.
+  - Protected `Dispatcher.Invoke` calls in `RefreshQueueStatusAsync` against shutdown race conditions.
+  - Cleansed quotes (`"`, `'`) and brackets (`<`, `>`) in `TailscaleService.ExtractLoginUrl`.
+
 ## [v1.0.4] - 2026-09-20
 
 ### Fixed

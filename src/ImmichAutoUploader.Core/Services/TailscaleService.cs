@@ -204,6 +204,6 @@ public static class TailscaleService
     internal static string? ExtractLoginUrl(string text)
     {
         var m = Regex.Match(text, @"https?://login\.tailscale\.com\S+", RegexOptions.IgnoreCase);
-        return m.Success ? m.Value.TrimEnd('.', ',', ')') : null;
+        return m.Success ? m.Value.TrimEnd('.', ',', ')', '"', '\'', '<', '>') : null;
     }
 }

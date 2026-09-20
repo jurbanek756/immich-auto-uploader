@@ -158,13 +158,18 @@ public sealed class UploadQueue : IDisposable
         {
             hash = await ComputeHashAsync(sourcePath, ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
             return EnqueueResult.FileNotFound;
         }
-
-        long? existingHashId = null;
-        string? existingHashPath = null;
+        catch (UnauthorizedAccessException ex)
+        {
+            if (!File.Exists(sourcePath))
+                return EnqueueResult.FileNotFound;
+            // File exists on disk but is locked/inaccessible (e.g. antivirus scan or transfer tool).
+            // Throw IOException to trigger settle retry in FileWatcherService rather than dropping the file.
+            throw new IOException($"Cannot access file for hashing (sharing or permission lock): {ex.Message}", ex);
+        }
 
         lock (_lock)
         {
@@ -227,8 +232,12 @@ public sealed class UploadQueue : IDisposable
             }
 
             // 2. Check if the content hash exists under another path (rename detection)
+            long? existingHashId = null;
+            string? existingHashPath = null;
+            string? existingHashStatus = null;
+
             using var hashCmd = _conn.CreateCommand();
-            hashCmd.CommandText = "SELECT id, source_path FROM queue WHERE file_hash = $h AND status IN ('Pending','Uploading','Failed') LIMIT 1;";
+            hashCmd.CommandText = "SELECT id, source_path, status FROM queue WHERE file_hash = $h AND status IN ('Pending','Uploading','Failed') LIMIT 1;";
             hashCmd.Parameters.AddWithValue("$h", hash);
             using (var reader = hashCmd.ExecuteReader())
             {
@@ -236,45 +245,49 @@ public sealed class UploadQueue : IDisposable
                 {
                     existingHashId = reader.GetInt64(0);
                     existingHashPath = reader.GetString(1);
+                    existingHashStatus = reader.GetString(2);
                 }
             }
-        }
 
-        // If the hash is already in the queue under another path, check if the old file still exists
-        if (existingHashId.HasValue && existingHashPath is not null)
-        {
-            if (string.Equals(existingHashPath, sourcePath, StringComparison.OrdinalIgnoreCase))
-                return EnqueueResult.AlreadyQueued;
-
-            bool oldFileExists = false;
-            try { oldFileExists = File.Exists(existingHashPath); }
-            catch { /* assume gone if inaccessible */ }
-
-            if (!oldFileExists)
+            if (existingHashId.HasValue && existingHashPath is not null)
             {
-                // File was renamed or moved: update the queue record to the new path and reset status to Pending
-                lock (_lock)
+                if (string.Equals(existingHashPath, sourcePath, StringComparison.OrdinalIgnoreCase))
+                    return EnqueueResult.AlreadyQueued;
+
+                bool oldFileExists = false;
+                try { oldFileExists = File.Exists(existingHashPath); }
+                catch { /* assume gone if inaccessible */ }
+
+                if (!oldFileExists)
                 {
-                    ThrowIfDisposed();
+                    // If the item is actively uploading, do not mutate its status or row
+                    if (existingHashStatus == "Uploading")
+                        return EnqueueResult.AlreadyQueued;
+
+                    // File was renamed or moved while Pending or Failed: update the record to the new path and reset to Pending
                     using var updateCmd = _conn.CreateCommand();
                     updateCmd.CommandText = @"
                         UPDATE queue 
                         SET source_path = $path, status = 'Pending', next_retry_at = NULL, updated_at = $now 
-                        WHERE id = $id;";
+                        WHERE id = $id AND status != 'Uploading';";
                     updateCmd.Parameters.AddWithValue("$path", sourcePath);
                     updateCmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
                     updateCmd.Parameters.AddWithValue("$id", existingHashId.Value);
-                    updateCmd.ExecuteNonQuery();
-                    return EnqueueResult.Enqueued;
+                    int updatedRows = updateCmd.ExecuteNonQuery();
+                    if (updatedRows > 0)
+                        return EnqueueResult.Enqueued;
+
+                    // If no rows updated, it might have completed or been removed; re-check upload status
+                    if (ExistsInUploaded(hash))
+                        return EnqueueResult.AlreadyUploaded;
+                }
+                else
+                {
+                    // Identical hash exists under an existing file path (duplicate file)
+                    return EnqueueResult.AlreadyQueued;
                 }
             }
 
-            return EnqueueResult.AlreadyQueued;
-        }
-
-        lock (_lock)
-        {
-            ThrowIfDisposed();
             if (ExistsInUploaded(hash))
                 return EnqueueResult.AlreadyUploaded;
 

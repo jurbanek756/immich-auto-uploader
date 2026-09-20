@@ -9,6 +9,9 @@ public class TailscaleServiceTests
     [InlineData("To authenticate, visit: https://login.tailscale.com/a/abc1234\n", "https://login.tailscale.com/a/abc1234")]
     [InlineData("Please visit https://login.tailscale.com/a/xyz9876. to complete login.", "https://login.tailscale.com/a/xyz9876")]
     [InlineData("Open (https://login.tailscale.com/a/parentheses) in your browser", "https://login.tailscale.com/a/parentheses")]
+    [InlineData("URL is \"https://login.tailscale.com/a/quoted123\"", "https://login.tailscale.com/a/quoted123")]
+    [InlineData("URL is 'https://login.tailscale.com/a/singlequoted'", "https://login.tailscale.com/a/singlequoted")]
+    [InlineData("Visit <https://login.tailscale.com/a/bracketed>", "https://login.tailscale.com/a/bracketed")]
     [InlineData("No login needed. Already connected.", null)]
     public void ExtractLoginUrl_ParsesUrlsCorrectly(string input, string? expected)
     {

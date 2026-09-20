@@ -179,17 +179,20 @@ public sealed class FileWatcherService : IDisposable
         {
             if (Directory.Exists(path))
                 return; // Directories are ignored; subdirectories are monitored via recursive watcher
+
+            if (IsTempFile(path) || !IsMediaFile(path) || IsUnderDoneFolder(path))
+                return;
+
+            // Reset the event timestamp and availability state.
+            // NOTE: If the file is currently being hashed in EnqueueAndLogAsync (which sets lastEvent = DateTime.MaxValue),
+            // a new file write event will overwrite it with DateTime.UtcNow.
+            // This ensures the file will NOT be removed by RemovePendingIfSentinel and will be re-evaluated.
+            _pending[path] = (DateTime.UtcNow, GetSizeSafe(path), false);
         }
-        catch { return; }
-
-        if (IsTempFile(path) || !IsMediaFile(path) || IsUnderDoneFolder(path))
-            return;
-
-        // Reset the event timestamp and availability state.
-        // NOTE: If the file is currently being hashed in EnqueueAndLogAsync (which sets lastEvent = DateTime.MaxValue),
-        // a new file write event will overwrite it with DateTime.UtcNow.
-        // This ensures the file will NOT be removed by RemovePendingIfSentinel and will be re-evaluated.
-        _pending[path] = (DateTime.UtcNow, GetSizeSafe(path), false);
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"Failed to process file-system event for '{path}': {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -420,8 +423,18 @@ public sealed class FileWatcherService : IDisposable
 
                 foreach (string sub in subdirs)
                 {
-                    if (!IsUnderDoneFolder(sub))
-                        stack.Push(sub);
+                    if (IsUnderDoneFolder(sub))
+                        continue;
+
+                    try
+                    {
+                        var di = new DirectoryInfo(sub);
+                        if (di.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                            continue; // Skip symlinks and junctions to prevent infinite recursive loops
+                    }
+                    catch { continue; }
+
+                    stack.Push(sub);
                 }
                 foreach (string f in files)
                 {
@@ -452,17 +465,24 @@ public sealed class FileWatcherService : IDisposable
     /// <returns><c>true</c> if the path is inside or identical to the Done directory; otherwise, <c>false</c>.</returns>
     internal bool IsUnderDoneFolder(string path)
     {
-        if (string.IsNullOrEmpty(_doneFolder))
+        if (string.IsNullOrEmpty(_doneFolder) || string.IsNullOrEmpty(path))
             return false;
 
-        string cleanDone = Path.TrimEndingDirectorySeparator(_doneFolder);
-        string cleanPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        try
+        {
+            string cleanDone = Path.TrimEndingDirectorySeparator(_doneFolder);
+            string cleanPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
 
-        if (string.Equals(cleanPath, cleanDone, StringComparison.OrdinalIgnoreCase))
-            return true;
+            if (string.Equals(cleanPath, cleanDone, StringComparison.OrdinalIgnoreCase))
+                return true;
 
-        string normalizedDone = cleanDone + Path.DirectorySeparatorChar;
-        return cleanPath.StartsWith(normalizedDone, StringComparison.OrdinalIgnoreCase);
+            string normalizedDone = cleanDone + Path.DirectorySeparatorChar;
+            return cleanPath.StartsWith(normalizedDone, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static long GetSizeSafe(string path)
