@@ -1,0 +1,8 @@
+# Standard .NET ignores
+bin/
+obj/
+*.user
+*.suo
+.vs/
+# Don't commit local secrets/settings or the downloaded binary
+tools/immich-go/

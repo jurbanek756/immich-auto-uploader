@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{9A19103F-16F7-8390-63F3-5FBA36FED3CF}") = "ImmichAutoUploader.Core", "src\ImmichAutoUploader.Core\ImmichAutoUploader.Core.csproj", "{7A9B3C1D-2E4F-4A5B-8C6D-9E0F1A2B3C4D}"
+EndProject
+Project("{9A19103F-16F7-8390-63F3-5FBA36FED3CF}") = "ImmichAutoUploader.App", "src\ImmichAutoUploader.App\ImmichAutoUploader.App.csproj", "{1B2C3D4E-5F6A-7B8C-9D0E-1F2A3B4C5D6E}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{7A9B3C1D-2E4F-4A5B-8C6D-9E0F1A2B3C4D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7A9B3C1D-2E4F-4A5B-8C6D-9E0F1A2B3C4D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7A9B3C1D-2E4F-4A5B-8C6D-9E0F1A2B3C4D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7A9B3C1D-2E4F-4A5B-8C6D-9E0F1A2B3C4D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1B2C3D4E-5F6A-7B8C-9D0E-1F2A3B4C5D6E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1B2C3D4E-5F6A-7B8C-9D0E-1F2A3B4C5D6E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1B2C3D4E-5F6A-7B8C-9D0E-1F2A3B4C5D6E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1B2C3D4E-5F6A-7B8C-9D0E-1F2A3B4C5D6E}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

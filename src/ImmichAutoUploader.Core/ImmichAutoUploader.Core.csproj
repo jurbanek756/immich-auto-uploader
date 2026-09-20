@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ImmichAutoUploader.Core</RootNamespace>
+    <AssemblyName>ImmichAutoUploader.Core</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Windows DPAPI for encrypted credential storage (Windows-only at runtime) -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <!-- Persistent upload queue (hash-tracked, survives restarts) -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <!-- Pin above the vulnerable range (<= 2.1.11, GHSA-2m69-gcr7-jv3q) pulled in transitively -->
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.13" />
+  </ItemGroup>
+
+</Project>
