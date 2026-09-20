@@ -43,7 +43,7 @@ public sealed class FileWatcherService : IDisposable
         new(StringComparer.OrdinalIgnoreCase);
     private readonly CancellationTokenSource _cts = new();
     private Task? _initialScanTask;
-    private readonly Task _settleTask;
+    private Task? _settleTask;
     private readonly TimeSpan _settleDelay = TimeSpan.FromSeconds(5);
     private readonly Channel<string> _enqueueChannel = Channel.CreateBounded<string>(new BoundedChannelOptions(2000)
     {
@@ -78,13 +78,12 @@ public sealed class FileWatcherService : IDisposable
             AppLogger.Warn($"File watcher error ({e.GetException().Message}); running full rescan.");
             Task.Run(() => InitialScanAsync(_cts.Token));
         };
-
-        _settleTask = SettleLoopAsync(_cts.Token);
     }
 
     public void Start()
     {
         _watcher.EnableRaisingEvents = true;
+        _settleTask = SettleLoopAsync(_cts.Token);
         for (int i = 0; i < 4; i++)
         {
             _workerTasks.Add(Task.Run(() => EnqueueWorkerLoopAsync(_cts.Token)));
@@ -255,24 +254,24 @@ public sealed class FileWatcherService : IDisposable
             {
                 case Models.EnqueueResult.Enqueued:
                     AppLogger.Info($"Queued for upload: {path}");
-                    _pending.TryRemove(path, out _);
+                    RemovePendingIfSentinel(path);
                     break;
                 case Models.EnqueueResult.SkippedEmptyFile:
                     AppLogger.Warn($"Skipped (empty file, Immich would reject it): {path}");
-                    _pending.TryRemove(path, out _);
+                    RemovePendingIfSentinel(path);
                     break;
                 case Models.EnqueueResult.AlreadyUploaded:
                     AppLogger.Info($"Skipped (already uploaded before): {path}");
-                    _pending.TryRemove(path, out _);
+                    RemovePendingIfSentinel(path);
                     break;
                 case Models.EnqueueResult.AlreadyQueued:
                     AppLogger.Info($"Skipped (already queued): {path}");
-                    _pending.TryRemove(path, out _);
+                    RemovePendingIfSentinel(path);
                     break;
                 case Models.EnqueueResult.SkippedNotMedia:
                 case Models.EnqueueResult.SkippedTempFile:
                 case Models.EnqueueResult.FileNotFound:
-                    _pending.TryRemove(path, out _);
+                    RemovePendingIfSentinel(path);
                     break;
             }
         }
@@ -290,7 +289,15 @@ public sealed class FileWatcherService : IDisposable
         catch (Exception ex)
         {
             AppLogger.Error($"Failed to queue {path}.", ex);
-            _pending.TryRemove(path, out _);
+            RemovePendingIfSentinel(path);
+        }
+    }
+
+    private void RemovePendingIfSentinel(string path)
+    {
+        if (_pending.TryGetValue(path, out var current) && current.lastEvent == DateTime.MaxValue)
+        {
+            _pending.TryRemove(new KeyValuePair<string, (DateTime, long, bool)>(path, current));
         }
     }
 
@@ -362,7 +369,7 @@ public sealed class FileWatcherService : IDisposable
         _disposed = true;
         _cts.Cancel();
         _enqueueChannel.Writer.TryComplete();
-        try { _settleTask.Wait(TimeSpan.FromSeconds(3)); }
+        try { _settleTask?.Wait(TimeSpan.FromSeconds(3)); }
         catch { /* best effort */ }
         try { _initialScanTask?.Wait(TimeSpan.FromSeconds(3)); }
         catch { /* best effort */ }

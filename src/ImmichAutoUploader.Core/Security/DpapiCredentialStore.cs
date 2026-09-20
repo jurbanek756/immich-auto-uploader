@@ -24,7 +24,10 @@ public sealed class DpapiCredentialStore : ICredentialStore
         Directory.CreateDirectory(SecretsDir);
         byte[] protectedBytes = ProtectedData.Protect(
             Encoding.UTF8.GetBytes(secret), optionalEntropy: null, DataProtectionScope.CurrentUser);
-        File.WriteAllBytes(PathFor(name), protectedBytes);
+        string destPath = PathFor(name);
+        string tempPath = destPath + ".tmp";
+        File.WriteAllBytes(tempPath, protectedBytes);
+        File.Move(tempPath, destPath, overwrite: true);
     }
 
     public string? Load(string name)

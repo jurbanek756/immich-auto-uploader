@@ -133,4 +133,27 @@ public class UploadEngineTests : IDisposable
         Assert.True(File.Exists(expectedDest));
         Assert.Equal(new byte[] { 42, 43, 44 }, File.ReadAllBytes(expectedDest));
     }
+
+    [Fact]
+    public async Task MoveToDoneAsync_WhenSourceFileLocked_DoesNotCreateCascadingDuplicates()
+    {
+        string sourceFile = Path.Combine(_watchDir, "locked_photo.jpg");
+        File.WriteAllBytes(sourceFile, new byte[] { 10, 20, 30 });
+
+        var settings = new AppSettings
+        {
+            WatchFolder = _watchDir,
+            DoneFolder = _doneDir,
+        };
+
+        // Lock the source file with FileShare.Read so File.Delete will fail with IOException
+        using (var lockStream = new FileStream(sourceFile, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            await UploadEngine.MoveToDoneAsync(sourceFile, settings);
+        }
+
+        // Verify that no cascading duplicates (photo (2).jpg, photo (3).jpg...) were created in Done folder
+        var doneFiles = Directory.GetFiles(_doneDir);
+        Assert.True(doneFiles.Length <= 1, $"Expected at most 1 file in Done folder, but found {doneFiles.Length}: {string.Join(", ", doneFiles)}");
+    }
 }

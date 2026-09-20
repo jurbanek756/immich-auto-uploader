@@ -34,7 +34,7 @@ public static class JellyfinService
                     return;
                 }
                 using var req = new HttpRequestMessage(HttpMethod.Post, $"{base_}/Items/{libraryId}/Refresh?Recursive=true");
-                req.Headers.Add("Authorization", $"MediaBrowser Token=\"{apiKey}\"");
+                req.Headers.TryAddWithoutValidation("Authorization", $"MediaBrowser Token=\"{apiKey}\"");
                 using var resp = await SharedClient.SendAsync(req, ct).ConfigureAwait(false);
                 if (resp.IsSuccessStatusCode)
                     AppLogger.Info($"Jellyfin: refresh triggered for library '{libraryName}'.");
@@ -44,7 +44,7 @@ public static class JellyfinService
             else
             {
                 using var req = new HttpRequestMessage(HttpMethod.Post, $"{base_}/Library/Refresh");
-                req.Headers.Add("Authorization", $"MediaBrowser Token=\"{apiKey}\"");
+                req.Headers.TryAddWithoutValidation("Authorization", $"MediaBrowser Token=\"{apiKey}\"");
                 using var resp = await SharedClient.SendAsync(req, ct).ConfigureAwait(false);
                 if (resp.IsSuccessStatusCode)
                     AppLogger.Info("Jellyfin: full library refresh triggered.");
@@ -62,7 +62,7 @@ public static class JellyfinService
         HttpClient http, string baseUrl, string apiKey, string libraryName, CancellationToken ct)
     {
         using var req = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/Library/MediaFolders");
-        req.Headers.Add("Authorization", $"MediaBrowser Token=\"{apiKey}\"");
+        req.Headers.TryAddWithoutValidation("Authorization", $"MediaBrowser Token=\"{apiKey}\"");
         using var resp = await http.SendAsync(req, ct).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
         {

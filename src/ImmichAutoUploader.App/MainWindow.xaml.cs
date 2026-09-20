@@ -226,7 +226,7 @@ public partial class MainWindow : Window
             try
             {
                 using var req = new HttpRequestMessage(HttpMethod.Get, url + "/api/users/me");
-                req.Headers.Add("x-api-key", apiKey);
+                req.Headers.TryAddWithoutValidation("x-api-key", apiKey);
                 using var resp = await SharedTestClient.SendAsync(req);
 
                 if (!resp.IsSuccessStatusCode)
@@ -268,7 +268,7 @@ public partial class MainWindow : Window
                 try
                 {
                     using var jfReq = new HttpRequestMessage(HttpMethod.Get, jellyfinUrl + "/System/Info");
-                    jfReq.Headers.Add("Authorization", $"MediaBrowser Token=\"{jellyfinKey}\"");
+                    jfReq.Headers.TryAddWithoutValidation("Authorization", $"MediaBrowser Token=\"{jellyfinKey}\"");
                     using var jfResp = await SharedTestClient.SendAsync(jfReq);
 
                     if (!jfResp.IsSuccessStatusCode)
@@ -377,19 +377,32 @@ public partial class MainWindow : Window
         {
             try
             {
+                if (Dispatcher.HasShutdownStarted)
+                    return;
+
                 if (App.Queue is null)
                 {
                     Dispatcher.Invoke(() => TxtQueueStatus.Text = "Queue not initialized.");
                     return;
                 }
                 var (pending, uploading, uploaded, failed) = App.Queue.GetStats();
-                Dispatcher.Invoke(() =>
-                    TxtQueueStatus.Text =
-                        $"Pending: {pending}    Uploading: {uploading}    Uploaded: {uploaded}    Failed: {failed}");
+                if (!Dispatcher.HasShutdownStarted)
+                {
+                    Dispatcher.Invoke(() =>
+                        TxtQueueStatus.Text =
+                            $"Pending: {pending}    Uploading: {uploading}    Uploaded: {uploaded}    Failed: {failed}");
+                }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not TaskCanceledException)
             {
-                Dispatcher.Invoke(() => TxtQueueStatus.Text = "Error reading queue: " + ex.Message);
+                if (!Dispatcher.HasShutdownStarted)
+                {
+                    try
+                    {
+                        Dispatcher.Invoke(() => TxtQueueStatus.Text = "Error reading queue: " + ex.Message);
+                    }
+                    catch { /* shutdown race */ }
+                }
             }
         });
     }

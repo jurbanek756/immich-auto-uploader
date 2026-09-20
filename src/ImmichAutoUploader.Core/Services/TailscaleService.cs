@@ -65,16 +65,23 @@ public static class TailscaleService
         if (!File.Exists(exePath))
             return new EnsureOutcome(EnsureResult.NotInstalled, exePath, false);
 
-        string? state = await GetBackendStateAsync(exePath, ct).ConfigureAwait(false);
+        var (state, authUrl) = await GetBackendStateAsync(exePath, ct).ConfigureAwait(false);
         if (state == "Running")
             return new EnsureOutcome(EnsureResult.Connected, null, false);
+
+        if (string.Equals(state, "NeedsLogin", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(state, "LoggedOut", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(state, "NeedsMachineAuth", StringComparison.OrdinalIgnoreCase))
+        {
+            return new EnsureOutcome(EnsureResult.AuthRequired, authUrl, false);
+        }
 
         AppLogger.Info("Tailscale not connected; running 'tailscale up'.");
 
         ProcessHelper.Result up;
         try
         {
-            up = await ProcessHelper.RunAsync(exePath, new[] { "up" }, 90_000, ct).ConfigureAwait(false);
+            up = await ProcessHelper.RunAsync(exePath, new[] { "up", "--timeout=10s" }, 15_000, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -82,17 +89,17 @@ public static class TailscaleService
         }
 
         string combined = up.StdOut + "\n" + up.StdErr;
-        string? loginUrl = ExtractLoginUrl(combined);
+        string? loginUrl = ExtractLoginUrl(combined) ?? authUrl;
         if (loginUrl is not null)
             return new EnsureOutcome(EnsureResult.AuthRequired, loginUrl, false);
 
-        state = await GetBackendStateAsync(exePath, ct).ConfigureAwait(false);
-        if (state == "Running")
+        var (newState, _) = await GetBackendStateAsync(exePath, ct).ConfigureAwait(false);
+        if (newState == "Running")
             return new EnsureOutcome(EnsureResult.Connected, null, true);
 
         string detail = ProcessHelper.Tail(combined, 5);
         if (string.IsNullOrWhiteSpace(detail))
-            detail = $"tailscale is not connected (state: {state ?? "unknown"})";
+            detail = $"tailscale is not connected (state: {newState ?? "unknown"})";
         return new EnsureOutcome(EnsureResult.Failed, detail, false);
     }
 
@@ -108,7 +115,7 @@ public static class TailscaleService
         {
             AppLogger.Info("Running 'tailscale down' (this batch connected it).");
             var r = await ProcessHelper.RunAsync(exePath, new[] { "down" }, 30_000, ct).ConfigureAwait(false);
-            string? state = await GetBackendStateAsync(exePath, ct).ConfigureAwait(false);
+            var (state, _) = await GetBackendStateAsync(exePath, ct).ConfigureAwait(false);
             if (r.ExitCode == 0 && !string.Equals(state, "Running", StringComparison.OrdinalIgnoreCase))
                 AppLogger.Info("Tailscale disconnected.");
             else
@@ -120,7 +127,7 @@ public static class TailscaleService
         }
     }
 
-    private static async Task<string?> GetBackendStateAsync(string exePath, CancellationToken ct)
+    private static async Task<(string? State, string? AuthUrl)> GetBackendStateAsync(string exePath, CancellationToken ct)
     {
         try
         {
@@ -128,8 +135,9 @@ public static class TailscaleService
             if (r.ExitCode == 0 && !string.IsNullOrWhiteSpace(r.StdOut))
             {
                 using var doc = JsonDocument.Parse(r.StdOut);
-                if (doc.RootElement.TryGetProperty("BackendState", out var bs))
-                    return bs.GetString();
+                string? state = doc.RootElement.TryGetProperty("BackendState", out var bs) ? bs.GetString() : null;
+                string? authUrl = doc.RootElement.TryGetProperty("AuthURL", out var au) ? au.GetString() : null;
+                return (state, authUrl);
             }
         }
         catch { /* fall through to text heuristic */ }
@@ -140,13 +148,13 @@ public static class TailscaleService
             var r = await ProcessHelper.RunAsync(exePath, new[] { "status" }, 15_000, ct).ConfigureAwait(false);
             string text = r.StdOut + r.StdErr;
             if (text.Contains("Logged out", StringComparison.OrdinalIgnoreCase))
-                return "LoggedOut";
+                return ("LoggedOut", ExtractLoginUrl(text));
             if (r.ExitCode == 0)
-                return "Running"; // best-effort guess
+                return ("Running", null); // best-effort guess
         }
         catch { }
 
-        return null;
+        return (null, null);
     }
 
     internal static string? ExtractLoginUrl(string text)

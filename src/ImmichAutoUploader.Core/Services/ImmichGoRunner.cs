@@ -26,8 +26,8 @@ public sealed record UploadResult(bool Success, int ExitCode, string ErrorDetail
 /// as a non-zero exit; the app-level OnErrors setting ("continue"/"stop") is
 /// applied by the engine across files instead.
 /// <para/>
-/// Secrets: IMMICH_API_KEY is passed via environment variable to protect it from
-/// process listing and event log auditing. Admin API key is passed via flag when present.
+/// Secrets: IMMICH_API_KEY and IMMICH_ADMIN_API_KEY are passed via environment variables to protect them
+/// from process listing and event log auditing.
 /// </summary>
 public static class ImmichGoRunner
 {
@@ -44,18 +44,17 @@ public static class ImmichGoRunner
             "--pause-immich-jobs", req.PauseJobs ? "true" : "false",
             "--device-uuid", req.DeviceUuid,
             "--log-level", "WARN",
+            req.FilePath
         };
-        if (!string.IsNullOrEmpty(req.AdminApiKey))
-        {
-            args.Add("--admin-api-key");
-            args.Add(req.AdminApiKey);
-        }
-        args.Add(req.FilePath);
 
         var env = new Dictionary<string, string>
         {
             ["IMMICH_API_KEY"] = req.ApiKey
         };
+        if (!string.IsNullOrEmpty(req.AdminApiKey))
+        {
+            env["IMMICH_ADMIN_API_KEY"] = req.AdminApiKey;
+        }
 
         ProcessHelper.Result r;
         try

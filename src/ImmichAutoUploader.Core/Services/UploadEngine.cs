@@ -341,7 +341,8 @@ public sealed class UploadEngine : IDisposable
         _queue.MarkUploaded(file.Id);
         try
         {
-            await MoveToDoneAsync(file.SourcePath, s, ct).ConfigureAwait(false);
+            using var moveCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await MoveToDoneAsync(file.SourcePath, s, moveCts.Token).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -377,19 +378,52 @@ public sealed class UploadEngine : IDisposable
             if (!string.IsNullOrEmpty(dir))
                 Directory.CreateDirectory(dir);
 
-            // Retry up to 5 times for concurrent moves to the same target
+            string target = DedupePath(dest);
+            bool copySucceeded = false;
+
+            // Retry up to 5 times for concurrent moves or transient file locks
             for (int attempt = 0; attempt < 5; attempt++)
             {
                 try
                 {
-                    string target = DedupePath(dest);
-                    MoveOrCopyFile(sourcePath, target);
+                    if (!copySucceeded)
+                    {
+                        bool isCrossVolume = !string.Equals(
+                            Path.GetPathRoot(Path.GetFullPath(sourcePath)),
+                            Path.GetPathRoot(Path.GetFullPath(target)),
+                            StringComparison.OrdinalIgnoreCase);
+
+                        if (!isCrossVolume)
+                        {
+                            try
+                            {
+                                File.Move(sourcePath, target);
+                                return;
+                            }
+                            catch (IOException)
+                            {
+                                // Handles volume mount points / junction edges or sharing violations
+                            }
+                        }
+
+                        File.Copy(sourcePath, target, overwrite: false);
+                        copySucceeded = true;
+                    }
+
+                    File.Delete(sourcePath);
                     return;
                 }
                 catch (IOException) when (attempt < 4)
                 {
-                    await Task.Delay(50, ct).ConfigureAwait(false);
+                    await Task.Delay(100 * (attempt + 1), ct).ConfigureAwait(false);
                 }
+            }
+
+            // If deletion of source failed after all retries, clean up the copied target to prevent orphaned duplicates
+            if (copySucceeded && File.Exists(sourcePath))
+            {
+                try { File.Delete(target); }
+                catch { /* best effort cleanup */ }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -412,33 +446,6 @@ public sealed class UploadEngine : IDisposable
             string candidate = Path.Combine(dir, $"{name} ({i}){ext}");
             if (!File.Exists(candidate))
                 return candidate;
-        }
-    }
-
-    private static void MoveOrCopyFile(string source, string destination)
-    {
-        bool isCrossVolume = !string.Equals(
-            Path.GetPathRoot(Path.GetFullPath(source)),
-            Path.GetPathRoot(Path.GetFullPath(destination)),
-            StringComparison.OrdinalIgnoreCase);
-
-        if (isCrossVolume)
-        {
-            File.Copy(source, destination, overwrite: false);
-            File.Delete(source);
-        }
-        else
-        {
-            try
-            {
-                File.Move(source, destination);
-            }
-            catch (IOException)
-            {
-                // Handles volume mount points / junction edges
-                File.Copy(source, destination, overwrite: false);
-                File.Delete(source);
-            }
         }
     }
 

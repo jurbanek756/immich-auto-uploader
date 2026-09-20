@@ -124,47 +124,70 @@ public sealed class UploadQueue : IDisposable
 
         string hash = await ComputeHashAsync(sourcePath, ct).ConfigureAwait(false);
 
+        long? existingId = null;
+        string? existingPath = null;
+
         lock (_lock)
         {
             ThrowIfDisposed();
             if (ExistsInUploaded(hash))
                 return EnqueueResult.AlreadyUploaded;
 
-            using (var checkCmd = _conn.CreateCommand())
+            using var checkCmd = _conn.CreateCommand();
+            checkCmd.CommandText = "SELECT id, source_path FROM queue WHERE file_hash = $h AND status IN ('Pending','Uploading','Failed') LIMIT 1;";
+            checkCmd.Parameters.AddWithValue("$h", hash);
+            using var reader = checkCmd.ExecuteReader();
+            if (reader.Read())
             {
-                checkCmd.CommandText = "SELECT id, source_path FROM queue WHERE file_hash = $h AND status IN ('Pending','Uploading','Failed') LIMIT 1;";
-                checkCmd.Parameters.AddWithValue("$h", hash);
-                using var reader = checkCmd.ExecuteReader();
-                if (reader.Read())
+                existingId = reader.GetInt64(0);
+                existingPath = reader.GetString(1);
+            }
+        }
+
+        if (existingId.HasValue && existingPath is not null)
+        {
+            if (string.Equals(existingPath, sourcePath, StringComparison.OrdinalIgnoreCase))
+                return EnqueueResult.AlreadyQueued;
+
+            bool oldFileExists = false;
+            try { oldFileExists = File.Exists(existingPath); }
+            catch { /* assume gone if inaccessible */ }
+
+            if (!oldFileExists)
+            {
+                lock (_lock)
                 {
-                    long existingId = reader.GetInt64(0);
-                    string existingPath = reader.GetString(1);
-                    if (!string.Equals(existingPath, sourcePath, StringComparison.OrdinalIgnoreCase) && !File.Exists(existingPath))
-                    {
-                        reader.Close();
-                        using var updateCmd = _conn.CreateCommand();
-                        updateCmd.CommandText = "UPDATE queue SET source_path = $path, updated_at = $now WHERE id = $id;";
-                        updateCmd.Parameters.AddWithValue("$path", sourcePath);
-                        updateCmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
-                        updateCmd.Parameters.AddWithValue("$id", existingId);
-                        updateCmd.ExecuteNonQuery();
-                        return EnqueueResult.Enqueued;
-                    }
-                    return EnqueueResult.AlreadyQueued;
+                    ThrowIfDisposed();
+                    using var updateCmd = _conn.CreateCommand();
+                    updateCmd.CommandText = "UPDATE queue SET source_path = $path, updated_at = $now WHERE id = $id;";
+                    updateCmd.Parameters.AddWithValue("$path", sourcePath);
+                    updateCmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
+                    updateCmd.Parameters.AddWithValue("$id", existingId.Value);
+                    updateCmd.ExecuteNonQuery();
+                    return EnqueueResult.Enqueued;
                 }
             }
 
+            return EnqueueResult.AlreadyQueued;
+        }
+
+        lock (_lock)
+        {
+            ThrowIfDisposed();
+            if (ExistsInUploaded(hash))
+                return EnqueueResult.AlreadyUploaded;
+
             using var cmd = _conn.CreateCommand();
             cmd.CommandText = @"
-                INSERT INTO queue (source_path, file_hash, file_size, status, detected_at, updated_at)
+                INSERT OR IGNORE INTO queue (source_path, file_hash, file_size, status, detected_at, updated_at)
                 VALUES ($path, $hash, $size, 'Pending', $now, $now);";
             cmd.Parameters.AddWithValue("$path", sourcePath);
             cmd.Parameters.AddWithValue("$hash", hash);
             cmd.Parameters.AddWithValue("$size", size);
             string now = DateTime.UtcNow.ToString("o");
             cmd.Parameters.AddWithValue("$now", now);
-            cmd.ExecuteNonQuery();
-            return EnqueueResult.Enqueued;
+            int rows = cmd.ExecuteNonQuery();
+            return rows > 0 ? EnqueueResult.Enqueued : EnqueueResult.AlreadyQueued;
         }
     }
 
