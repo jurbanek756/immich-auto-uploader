@@ -231,4 +231,78 @@ public class UploadQueueTests : IDisposable
         Assert.Equal(1, stats.Pending);
         Assert.Equal(0, stats.Failed);
     }
+
+    [Fact]
+    public async Task TryEnqueueAsync_SamePathModifiedContent_UpdatesHashAndResetsPending()
+    {
+        string file = CreateTempMediaFile("modified.jpg", new byte[] { 1, 2, 3 });
+        var res1 = await _queue.TryEnqueueAsync(file);
+        Assert.Equal(EnqueueResult.Enqueued, res1);
+
+        // Modify the file contents on disk
+        File.WriteAllBytes(file, new byte[] { 1, 2, 3, 4, 5, 6 });
+
+        var res2 = await _queue.TryEnqueueAsync(file);
+        Assert.Equal(EnqueueResult.Enqueued, res2);
+
+        var stats = _queue.GetStats();
+        Assert.Equal(1, stats.Pending);
+
+        var batch = _queue.DequeueBatch(10);
+        Assert.Single(batch);
+        Assert.Equal(6, batch[0].FileSize);
+    }
+
+    [Fact]
+    public async Task TryEnqueueAsync_FileRenamedWhileFailed_ResetsStatusToPending()
+    {
+        string file1 = CreateTempMediaFile("orig_failed.jpg", new byte[] { 7, 8, 9 });
+        await _queue.TryEnqueueAsync(file1);
+
+        var batch = _queue.DequeueBatch(10);
+        _queue.MarkFailed(batch[0].Id, "Transient network drop");
+
+        Assert.Equal(1, _queue.GetStats().Failed);
+        Assert.Equal(0, _queue.CountDue());
+
+        // Rename the file while in Failed state
+        string file2 = Path.Combine(_tempTestDir, "renamed_after_fail.jpg");
+        File.Move(file1, file2);
+
+        var res = await _queue.TryEnqueueAsync(file2);
+        Assert.Equal(EnqueueResult.Enqueued, res);
+
+        // Status should be reset to Pending and immediately due (not blocked by backoff)
+        var stats = _queue.GetStats();
+        Assert.Equal(1, stats.Pending);
+        Assert.Equal(0, stats.Failed);
+        Assert.Equal(1, _queue.CountDue());
+
+        var batch2 = _queue.DequeueBatch(10);
+        Assert.Single(batch2);
+        Assert.Equal(file2, batch2[0].SourcePath);
+    }
+
+    [Fact]
+    public async Task GetStats_ReturnsAccurateCountsGrouped()
+    {
+        string f1 = CreateTempMediaFile("s1.jpg", new byte[] { 1 });
+        string f2 = CreateTempMediaFile("s2.jpg", new byte[] { 2 });
+        string f3 = CreateTempMediaFile("s3.jpg", new byte[] { 3 });
+
+        await _queue.TryEnqueueAsync(f1);
+        await _queue.TryEnqueueAsync(f2);
+        await _queue.TryEnqueueAsync(f3);
+
+        var batch = _queue.DequeueBatch(2); // f1, f2 -> Uploading
+        _queue.MarkUploaded(batch[0].Id);   // f1 -> Uploaded
+        _queue.MarkFailed(batch[1].Id, "err"); // f2 -> Failed
+
+        // f3 is still Pending
+        var stats = _queue.GetStats();
+        Assert.Equal(1, stats.Pending);
+        Assert.Equal(0, stats.Uploading);
+        Assert.Equal(1, stats.Uploaded);
+        Assert.Equal(1, stats.Failed);
+    }
 }

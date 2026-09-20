@@ -71,8 +71,17 @@ public partial class App : System.Windows.Application
 
         if (!_ownsMutex)
         {
-            System.Windows.MessageBox.Show("Immich Auto Uploader is already running (check the system tray).",
-                "Immich Auto Uploader", MessageBoxButton.OK, MessageBoxImage.Information);
+            IntPtr hWnd = FindWindow(null, "Immich Auto Uploader — Settings");
+            if (hWnd != IntPtr.Zero)
+            {
+                ShowWindow(hWnd, SW_RESTORE);
+                SetForegroundWindow(hWnd);
+            }
+            else
+            {
+                System.Windows.MessageBox.Show("Immich Auto Uploader is already running (check the system tray).",
+                    "Immich Auto Uploader", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
             Shutdown();
             return;
         }
@@ -220,4 +229,17 @@ public partial class App : System.Windows.Application
         }
         base.OnExit(e);
     }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr FindWindow(string? lpClassName, string lpWindowName);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    private const int SW_RESTORE = 9;
 }

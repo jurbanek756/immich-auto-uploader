@@ -44,6 +44,20 @@ public class UploadEngineTests : IDisposable
     }
 
     [Fact]
+    public void RedactSecrets_CaseInsensitiveMatching()
+    {
+        var creds = new EngineCredentials("Secret-Immich-Key", "Admin-Key-123", "Jellyfin-Token");
+        string input = "error: SECRET-IMMICH-KEY failed, admin-key-123 invalid, JELLYFIN-TOKEN expired";
+
+        string redacted = UploadEngine.RedactSecrets(input, creds);
+
+        Assert.DoesNotContain("Secret-Immich-Key", redacted, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Admin-Key-123", redacted, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Jellyfin-Token", redacted, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("error: [REDACTED] failed, [REDACTED] invalid, [REDACTED] expired", redacted);
+    }
+
+    [Fact]
     public async Task MoveToDoneAsync_PreservesRelativePath()
     {
         string subDir = Path.Combine(_watchDir, "2026", "vacation");

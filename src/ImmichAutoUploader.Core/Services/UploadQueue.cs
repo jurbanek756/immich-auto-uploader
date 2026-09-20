@@ -153,8 +153,8 @@ public sealed class UploadQueue : IDisposable
         // Perform SHA-256 hashing outside the database lock to avoid blocking readers/writers
         string hash = await ComputeHashAsync(sourcePath, ct).ConfigureAwait(false);
 
-        long? existingId = null;
-        string? existingPath = null;
+        long? existingHashId = null;
+        string? existingHashPath = null;
 
         lock (_lock)
         {
@@ -162,38 +162,83 @@ public sealed class UploadQueue : IDisposable
             if (ExistsInUploaded(hash))
                 return EnqueueResult.AlreadyUploaded;
 
-            using var checkCmd = _conn.CreateCommand();
-            checkCmd.CommandText = "SELECT id, source_path FROM queue WHERE file_hash = $h AND status IN ('Pending','Uploading','Failed') LIMIT 1;";
-            checkCmd.Parameters.AddWithValue("$h", hash);
-            using var reader = checkCmd.ExecuteReader();
-            if (reader.Read())
+            // 1. Check if the exact source_path is already tracked in the queue
+            using var pathCmd = _conn.CreateCommand();
+            pathCmd.CommandText = "SELECT id, file_hash, status FROM queue WHERE source_path = $path AND status IN ('Pending','Uploading','Failed') LIMIT 1;";
+            pathCmd.Parameters.AddWithValue("$path", sourcePath);
+            using (var reader = pathCmd.ExecuteReader())
             {
-                existingId = reader.GetInt64(0);
-                existingPath = reader.GetString(1);
+                if (reader.Read())
+                {
+                    long pathId = reader.GetInt64(0);
+                    string trackedHash = reader.GetString(1);
+                    string trackedStatus = reader.GetString(2);
+
+                    if (string.Equals(trackedHash, hash, StringComparison.OrdinalIgnoreCase))
+                        return EnqueueResult.AlreadyQueued;
+
+                    // Content changed on disk while queued:
+                    // If not actively uploading, update hash, size, and reset to Pending for upload
+                    if (trackedStatus != "Uploading")
+                    {
+                        reader.Close();
+                        using var updateCmd = _conn.CreateCommand();
+                        updateCmd.CommandText = @"
+                            UPDATE queue 
+                            SET file_hash = $hash, file_size = $size, status = 'Pending', 
+                                last_error = NULL, next_retry_at = NULL, updated_at = $now 
+                            WHERE id = $id;";
+                        updateCmd.Parameters.AddWithValue("$hash", hash);
+                        updateCmd.Parameters.AddWithValue("$size", size);
+                        updateCmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
+                        updateCmd.Parameters.AddWithValue("$id", pathId);
+                        updateCmd.ExecuteNonQuery();
+                        return EnqueueResult.Enqueued;
+                    }
+
+                    // If currently uploading, do not mutate in-flight row; settle loop will re-evaluate once finished
+                    return EnqueueResult.AlreadyQueued;
+                }
+            }
+
+            // 2. Check if the content hash exists under another path (rename detection)
+            using var hashCmd = _conn.CreateCommand();
+            hashCmd.CommandText = "SELECT id, source_path FROM queue WHERE file_hash = $h AND status IN ('Pending','Uploading','Failed') LIMIT 1;";
+            hashCmd.Parameters.AddWithValue("$h", hash);
+            using (var reader = hashCmd.ExecuteReader())
+            {
+                if (reader.Read())
+                {
+                    existingHashId = reader.GetInt64(0);
+                    existingHashPath = reader.GetString(1);
+                }
             }
         }
 
-        // If the hash is already in the queue, check if the previous file still exists
-        if (existingId.HasValue && existingPath is not null)
+        // If the hash is already in the queue under another path, check if the old file still exists
+        if (existingHashId.HasValue && existingHashPath is not null)
         {
-            if (string.Equals(existingPath, sourcePath, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(existingHashPath, sourcePath, StringComparison.OrdinalIgnoreCase))
                 return EnqueueResult.AlreadyQueued;
 
             bool oldFileExists = false;
-            try { oldFileExists = File.Exists(existingPath); }
+            try { oldFileExists = File.Exists(existingHashPath); }
             catch { /* assume gone if inaccessible */ }
 
             if (!oldFileExists)
             {
-                // File was renamed or moved: update the queue record to the new path
+                // File was renamed or moved: update the queue record to the new path and reset status to Pending
                 lock (_lock)
                 {
                     ThrowIfDisposed();
                     using var updateCmd = _conn.CreateCommand();
-                    updateCmd.CommandText = "UPDATE queue SET source_path = $path, updated_at = $now WHERE id = $id;";
+                    updateCmd.CommandText = @"
+                        UPDATE queue 
+                        SET source_path = $path, status = 'Pending', next_retry_at = NULL, updated_at = $now 
+                        WHERE id = $id;";
                     updateCmd.Parameters.AddWithValue("$path", sourcePath);
                     updateCmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
-                    updateCmd.Parameters.AddWithValue("$id", existingId.Value);
+                    updateCmd.Parameters.AddWithValue("$id", existingHashId.Value);
                     updateCmd.ExecuteNonQuery();
                     return EnqueueResult.Enqueued;
                 }
@@ -479,18 +524,31 @@ public sealed class UploadQueue : IDisposable
         lock (_lock)
         {
             ThrowIfDisposed();
-            int Count(string sql)
+            int pending = 0, uploading = 0, failed = 0;
+            using (var cmd = _conn.CreateCommand())
             {
-                using var cmd = _conn.CreateCommand();
-                cmd.CommandText = sql;
-                return Convert.ToInt32(cmd.ExecuteScalar());
+                cmd.CommandText = "SELECT status, COUNT(*) FROM queue GROUP BY status;";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    string status = reader.GetString(0);
+                    int count = reader.GetInt32(1);
+                    if (string.Equals(status, "Pending", StringComparison.OrdinalIgnoreCase)) pending = count;
+                    else if (string.Equals(status, "Uploading", StringComparison.OrdinalIgnoreCase)) uploading = count;
+                    else if (string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase)) failed = count;
+                }
             }
-            return (
-                Count("SELECT COUNT(*) FROM queue WHERE status = 'Pending';"),
-                Count("SELECT COUNT(*) FROM queue WHERE status = 'Uploading';"),
-                Count("SELECT COUNT(*) FROM uploaded;"),
-                Count("SELECT COUNT(*) FROM queue WHERE status = 'Failed';")
-            );
+
+            int uploaded = 0;
+            using (var cmd = _conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT COUNT(*) FROM uploaded;";
+                object? val = cmd.ExecuteScalar();
+                if (val is not null && val != DBNull.Value)
+                    uploaded = Convert.ToInt32(val);
+            }
+
+            return (pending, uploading, uploaded, failed);
         }
     }
 
