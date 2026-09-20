@@ -100,6 +100,13 @@ public sealed class UploadEngine : IDisposable
         }
     }
 
+    private enum ProcessOutcome
+    {
+        Uploaded,
+        Failed,
+        Skipped,
+    }
+
     private async Task RunBatchCoreAsync(CancellationToken ct)
     {
         AppSettings s;
@@ -180,6 +187,7 @@ public sealed class UploadEngine : IDisposable
             int parallelism = Math.Clamp(s.ConcurrentTasks, 1, 20);
             using var gate = new SemaphoreSlim(parallelism, parallelism);
             bool stopRequested = false;
+            var processedIds = new System.Collections.Concurrent.ConcurrentBag<long>();
 
             var tasks = batch.Select(async file =>
             {
@@ -188,14 +196,21 @@ public sealed class UploadEngine : IDisposable
                 {
                     if (stopRequested || ct.IsCancellationRequested)
                         return;
-                    bool ok = await ProcessFileAsync(file, s, creds, serverUrl, ct).ConfigureAwait(false);
-                    if (ok)
-                        Interlocked.Increment(ref uploaded);
-                    else
+
+                    processedIds.Add(file.Id);
+                    var outcome = await ProcessFileAsync(file, s, creds, serverUrl, ct).ConfigureAwait(false);
+                    switch (outcome)
                     {
-                        Interlocked.Increment(ref failed);
-                        if (string.Equals(s.OnErrors, "stop", StringComparison.OrdinalIgnoreCase))
-                            stopRequested = true;
+                        case ProcessOutcome.Uploaded:
+                            Interlocked.Increment(ref uploaded);
+                            break;
+                        case ProcessOutcome.Failed:
+                            Interlocked.Increment(ref failed);
+                            if (string.Equals(s.OnErrors, "stop", StringComparison.OrdinalIgnoreCase))
+                                stopRequested = true;
+                            break;
+                        case ProcessOutcome.Skipped:
+                            break;
                     }
                 }
                 finally
@@ -210,6 +225,12 @@ public sealed class UploadEngine : IDisposable
             catch (OperationCanceledException)
             {
                 // shutting down mid-batch; queued rows stay consistent
+            }
+            finally
+            {
+                // Revert any dequeued files that were not processed back to Pending
+                var unprocessedIds = batch.Select(b => b.Id).Except(processedIds);
+                _queue.RevertToPending(unprocessedIds);
             }
             sw.Stop();
 
@@ -234,13 +255,17 @@ public sealed class UploadEngine : IDisposable
         finally
         {
             // 5. Tailscale teardown — after uploads AND the Jellyfin refresh,
-            //    and only when this batch connected it.
+            //    and only when this batch connected it. Use a fresh timeout token so
+            //    disconnection is not aborted if ct is already cancelled.
             if (tailscaleConnectedByUs && tailscaleExe is not null)
-                await TailscaleService.DisconnectAsync(tailscaleExe, ct).ConfigureAwait(false);
+            {
+                using var cleanupCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                await TailscaleService.DisconnectAsync(tailscaleExe, cleanupCts.Token).ConfigureAwait(false);
+            }
         }
     }
 
-    private async Task<bool> ProcessFileAsync(
+    private async Task<ProcessOutcome> ProcessFileAsync(
         QueuedFile file, AppSettings s, EngineCredentials creds, string serverUrl, CancellationToken ct)
     {
         // Re-validate: the file may have been moved or deleted since it was queued.
@@ -252,18 +277,18 @@ public sealed class UploadEngine : IDisposable
             {
                 _queue.Remove(file.Id);
                 AppLogger.Info($"Dropped from queue (file no longer exists): {file.SourcePath}");
-                return true; // not a failure — nothing to upload
+                return ProcessOutcome.Skipped;
             }
             if (fi.Length == 0)
             {
                 _queue.MarkFailed(file.Id, "File is empty (0 bytes).");
-                return false;
+                return ProcessOutcome.Failed;
             }
         }
         catch (Exception ex)
         {
             _queue.MarkFailed(file.Id, $"Cannot access file: {ex.Message}");
-            return false;
+            return ProcessOutcome.Failed;
         }
 
         var req = new UploadRequest(
@@ -278,21 +303,32 @@ public sealed class UploadEngine : IDisposable
         catch (Exception ex)
         {
             _queue.MarkFailed(file.Id, $"Runner error: {ex.Message}");
-            return false;
+            return ProcessOutcome.Failed;
         }
 
         if (!result.Success)
         {
-            string err = $"immich-go exit {result.ExitCode}: {result.ErrorDetail}";
+            string redactedDetail = RedactSecrets(result.ErrorDetail, creds);
+            string err = $"immich-go exit {result.ExitCode}: {redactedDetail}";
             _queue.MarkFailed(file.Id, err);
-            AppLogger.Warn($"Upload failed: {file.SourcePath} — {result.ErrorDetail}");
-            return false;
+            AppLogger.Warn($"Upload failed: {file.SourcePath} — {redactedDetail}");
+            return ProcessOutcome.Failed;
         }
 
         _queue.MarkUploaded(file.Id);
         MoveToDone(file.SourcePath, s);
         AppLogger.Info($"Uploaded: {file.SourcePath}");
-        return true;
+        return ProcessOutcome.Uploaded;
+    }
+
+    private static string RedactSecrets(string text, EngineCredentials creds)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        if (!string.IsNullOrEmpty(creds.ImmichApiKey))
+            text = text.Replace(creds.ImmichApiKey, "[REDACTED]");
+        if (!string.IsNullOrEmpty(creds.ImmichAdminApiKey))
+            text = text.Replace(creds.ImmichAdminApiKey, "[REDACTED]");
+        return text;
     }
 
     private static void MoveToDone(string sourcePath, AppSettings s)
@@ -305,9 +341,24 @@ public sealed class UploadEngine : IDisposable
             if (relative.StartsWith("..", StringComparison.Ordinal))
                 relative = Path.GetFileName(sourcePath); // not under the watch folder; flat move
             string dest = Path.Combine(s.DoneFolder, relative);
-            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-            dest = DedupePath(dest);
-            File.Move(sourcePath, dest);
+            string? dir = Path.GetDirectoryName(dest);
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+
+            // Retry up to 5 times for concurrent moves to the same target
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                try
+                {
+                    string target = DedupePath(dest);
+                    File.Move(sourcePath, target);
+                    return;
+                }
+                catch (IOException) when (attempt < 4)
+                {
+                    Thread.Sleep(50);
+                }
+            }
         }
         catch (Exception ex)
         {

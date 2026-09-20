@@ -98,9 +98,25 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (!string.IsNullOrWhiteSpace(TxtUrl.Text) &&
+            (!Uri.TryCreate(TxtUrl.Text.Trim(), UriKind.Absolute, out var immichUri) ||
+             (immichUri.Scheme != Uri.UriSchemeHttp && immichUri.Scheme != Uri.UriSchemeHttps)))
+        {
+            SetStatus("Immich server URL must be a valid http:// or https:// URL.");
+            return;
+        }
+
         if (!string.IsNullOrWhiteSpace(TxtJellyfinUrl.Text) && string.IsNullOrWhiteSpace(TxtJellyfinApiKey.Password))
         {
             SetStatus("Jellyfin URL is set but the API key is empty.");
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(TxtJellyfinUrl.Text) &&
+            (!Uri.TryCreate(TxtJellyfinUrl.Text.Trim(), UriKind.Absolute, out var jfUri) ||
+             (jfUri.Scheme != Uri.UriSchemeHttp && jfUri.Scheme != Uri.UriSchemeHttps)))
+        {
+            SetStatus("Jellyfin server URL must be a valid http:// or https:// URL.");
             return;
         }
 
@@ -113,8 +129,10 @@ public partial class MainWindow : Window
             JellyfinLibraryName = TxtJellyfinLibrary.Text.Trim(),
             UseTailscale = ChkUseTailscale.IsChecked == true,
             ImmichUrlViaTailscale = TxtTailscaleUrl.Text.Trim().TrimEnd('/'),
+            TailscalePath = App.Settings.TailscalePath,
             ImmichGoPath = TxtGoPath.Text.Trim(),
             ImmichGoVersion = App.Settings.ImmichGoVersion, // managed by build.ps1
+            DeviceUuid = App.Settings.DeviceUuid,
             ConcurrentTasks = concurrent,
             OnErrors = (CmbOnErrors.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content as string ?? "continue",
             PauseImmichJobs = ChkPauseJobs.IsChecked == true,
@@ -164,92 +182,102 @@ public partial class MainWindow : Window
 
     private async void TestConnection_Click(object sender, RoutedEventArgs e)
     {
-        string url = TxtUrl.Text.Trim().TrimEnd('/');
-        string apiKey = TxtApiKey.Password;
+        var btn = sender as System.Windows.Controls.Button;
+        if (btn is not null) btn.IsEnabled = false;
 
-        if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(apiKey))
-        {
-            SetStatus("Enter a server URL and API key first.");
-            return;
-        }
-
-        SetStatus("Testing connection…");
-        string immichWho;
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
-            using var req = new HttpRequestMessage(HttpMethod.Get, url + "/api/users/me");
-            req.Headers.Add("x-api-key", apiKey);
-            using var resp = await http.SendAsync(req);
+            string url = TxtUrl.Text.Trim().TrimEnd('/');
+            string apiKey = TxtApiKey.Password;
 
-            if (!resp.IsSuccessStatusCode)
+            if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(apiKey))
             {
-                SetStatus($"Immich connection failed: HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}. Check URL/key.");
+                SetStatus("Enter a server URL and API key first.");
                 return;
             }
 
-            immichWho = "ok";
+            SetStatus("Testing connection…");
+            string immichWho;
             try
             {
-                using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-                if (doc.RootElement.TryGetProperty("name", out var name))
-                    immichWho = name.GetString() ?? immichWho;
-                else if (doc.RootElement.TryGetProperty("email", out var email))
-                    immichWho = email.GetString() ?? immichWho;
-            }
-            catch { /* display name is best-effort */ }
-        }
-        catch (Exception ex)
-        {
-            SetStatus($"Immich connection failed: {ex.Message}");
-            return;
-        }
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+                using var req = new HttpRequestMessage(HttpMethod.Get, url + "/api/users/me");
+                req.Headers.Add("x-api-key", apiKey);
+                using var resp = await http.SendAsync(req);
 
-        // Optional Jellyfin check. NOTE: this Jellyfin instance requires the
-        // "Authorization: MediaBrowser Token=..." header (?api_key= / X-Emby-Token 401 here).
-        string jellyfinMsg = string.Empty;
-        string jellyfinUrl = TxtJellyfinUrl.Text.Trim().TrimEnd('/');
-        if (!string.IsNullOrWhiteSpace(jellyfinUrl))
-        {
-            string jellyfinKey = TxtJellyfinApiKey.Password;
-            if (string.IsNullOrWhiteSpace(jellyfinKey))
-            {
-                SetStatus("Jellyfin URL is set but the API key is empty.");
-                return;
-            }
-
-            try
-            {
-                using var jfHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
-                using var jfReq = new HttpRequestMessage(HttpMethod.Get, jellyfinUrl + "/System/Info");
-                jfReq.Headers.Add("Authorization", $"MediaBrowser Token=\"{jellyfinKey}\"");
-                using var jfResp = await jfHttp.SendAsync(jfReq);
-
-                if (!jfResp.IsSuccessStatusCode)
+                if (!resp.IsSuccessStatusCode)
                 {
-                    SetStatus($"Jellyfin check failed: HTTP {(int)jfResp.StatusCode}. Check URL/key.");
+                    SetStatus($"Immich connection failed: HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}. Check URL/key.");
                     return;
                 }
 
-                string jfVersion = "?";
+                immichWho = "ok";
                 try
                 {
-                    using var doc = JsonDocument.Parse(await jfResp.Content.ReadAsStringAsync());
-                    if (doc.RootElement.TryGetProperty("Version", out var v))
-                        jfVersion = v.GetString() ?? jfVersion;
+                    using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+                    if (doc.RootElement.TryGetProperty("name", out var name))
+                        immichWho = name.GetString() ?? immichWho;
+                    else if (doc.RootElement.TryGetProperty("email", out var email))
+                        immichWho = email.GetString() ?? immichWho;
                 }
-                catch { /* version is best-effort */ }
-
-                jellyfinMsg = $" Jellyfin OK (v{jfVersion}).";
+                catch { /* display name is best-effort */ }
             }
             catch (Exception ex)
             {
-                SetStatus($"Jellyfin check failed: {ex.Message}");
+                SetStatus($"Immich connection failed: {ex.Message}");
                 return;
             }
-        }
 
-        SetStatus($"Immich: connected as {immichWho}.{jellyfinMsg}");
+            // Optional Jellyfin check. NOTE: this Jellyfin instance requires the
+            // "Authorization: MediaBrowser Token=..." header (?api_key= / X-Emby-Token 401 here).
+            string jellyfinMsg = string.Empty;
+            string jellyfinUrl = TxtJellyfinUrl.Text.Trim().TrimEnd('/');
+            if (!string.IsNullOrWhiteSpace(jellyfinUrl))
+            {
+                string jellyfinKey = TxtJellyfinApiKey.Password;
+                if (string.IsNullOrWhiteSpace(jellyfinKey))
+                {
+                    SetStatus("Jellyfin URL is set but the API key is empty.");
+                    return;
+                }
+
+                try
+                {
+                    using var jfHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+                    using var jfReq = new HttpRequestMessage(HttpMethod.Get, jellyfinUrl + "/System/Info");
+                    jfReq.Headers.Add("Authorization", $"MediaBrowser Token=\"{jellyfinKey}\"");
+                    using var jfResp = await jfHttp.SendAsync(jfReq);
+
+                    if (!jfResp.IsSuccessStatusCode)
+                    {
+                        SetStatus($"Jellyfin check failed: HTTP {(int)jfResp.StatusCode}. Check URL/key.");
+                        return;
+                    }
+
+                    string jfVersion = "?";
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(await jfResp.Content.ReadAsStringAsync());
+                        if (doc.RootElement.TryGetProperty("Version", out var v))
+                            jfVersion = v.GetString() ?? jfVersion;
+                    }
+                    catch { /* version is best-effort */ }
+
+                    jellyfinMsg = $" Jellyfin OK (v{jfVersion}).";
+                }
+                catch (Exception ex)
+                {
+                    SetStatus($"Jellyfin check failed: {ex.Message}");
+                    return;
+                }
+            }
+
+            SetStatus($"Immich: connected as {immichWho}.{jellyfinMsg}");
+        }
+        finally
+        {
+            if (btn is not null) btn.IsEnabled = true;
+        }
     }
 
     private static void ApplyStartWithWindows(bool enable)
@@ -261,7 +289,7 @@ public partial class MainWindow : Window
         {
             string exe = Environment.ProcessPath ?? string.Empty;
             if (!string.IsNullOrEmpty(exe))
-                key.SetValue(RunValueName, $"\"{exe}\"");
+                key.SetValue(RunValueName, $"\"{exe}\" --tray");
         }
         else
         {
@@ -275,16 +303,26 @@ public partial class MainWindow : Window
 
     private async void UploadNow_Click(object sender, RoutedEventArgs e)
     {
-        var engine = App.Engine;
-        if (engine is null)
+        var btn = sender as System.Windows.Controls.Button;
+        if (btn is not null) btn.IsEnabled = false;
+
+        try
         {
-            SetStatus("Upload engine is not running.");
-            return;
+            var engine = App.Engine;
+            if (engine is null)
+            {
+                SetStatus("Upload engine is not running.");
+                return;
+            }
+            SetStatus("Upload batch running…");
+            bool started = await engine.TriggerNowAsync();
+            SetStatus(started ? "Batch finished." : "A batch is already running; try again shortly.");
+            await RefreshQueueStatusAsync();
         }
-        SetStatus("Upload batch running…");
-        bool started = await engine.TriggerNowAsync();
-        SetStatus(started ? "Batch finished." : "A batch is already running; try again shortly.");
-        await RefreshQueueStatusAsync();
+        finally
+        {
+            if (btn is not null) btn.IsEnabled = true;
+        }
     }
 
     private async Task RefreshQueueStatusAsync()

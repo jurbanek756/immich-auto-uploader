@@ -42,8 +42,11 @@ internal static class ProcessHelper
                 catch { /* already gone */ }
             });
 
-            string stdOut = await process.StandardOutput.ReadToEndAsync(linkedCts.Token).ConfigureAwait(false);
-            string stdErr = await process.StandardError.ReadToEndAsync(linkedCts.Token).ConfigureAwait(false);
+            var stdOutTask = process.StandardOutput.ReadToEndAsync(linkedCts.Token);
+            var stdErrTask = process.StandardError.ReadToEndAsync(linkedCts.Token);
+            await Task.WhenAll(stdOutTask, stdErrTask).ConfigureAwait(false);
+            string stdOut = await stdOutTask.ConfigureAwait(false);
+            string stdErr = await stdErrTask.ConfigureAwait(false);
             await process.WaitForExitAsync(linkedCts.Token).ConfigureAwait(false);
 
             bool timedOut = timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested;

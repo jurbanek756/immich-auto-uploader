@@ -29,6 +29,13 @@ public sealed class UploadQueue : IDisposable
 
         _conn = new SqliteConnection($"Data Source={dbPath}");
         _conn.Open();
+
+        using (var pragma = _conn.CreateCommand())
+        {
+            pragma.CommandText = "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;";
+            pragma.ExecuteNonQuery();
+        }
+
         InitializeSchema();
     }
 
@@ -56,7 +63,10 @@ public sealed class UploadQueue : IDisposable
                     source_path     TEXT NOT NULL,
                     uploaded_at     TEXT NOT NULL,
                     immich_asset_id TEXT
-                );";
+                );
+                -- Ensure no existing duplicates before adding unique index
+                DELETE FROM queue WHERE id NOT IN (SELECT MIN(id) FROM queue GROUP BY file_hash);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_hash_unique ON queue(file_hash);";
             cmd.ExecuteNonQuery();
         }
 
@@ -144,7 +154,7 @@ public sealed class UploadQueue : IDisposable
     private bool ExistsInQueue(string hash)
     {
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT 1 FROM queue WHERE file_hash = $h AND status IN ('Pending','Uploading') LIMIT 1;";
+        cmd.CommandText = "SELECT 1 FROM queue WHERE file_hash = $h AND status IN ('Pending','Uploading','Failed') LIMIT 1;";
         cmd.Parameters.AddWithValue("$h", hash);
         return cmd.ExecuteScalar() is not null;
     }
@@ -239,20 +249,51 @@ public sealed class UploadQueue : IDisposable
             }
             if (hash is null) return;
 
-            using var insert = _conn.CreateCommand();
-            insert.CommandText = @"
-                INSERT OR IGNORE INTO uploaded (file_hash, source_path, uploaded_at, immich_asset_id)
-                VALUES ($h, $p, $now, $asset);";
-            insert.Parameters.AddWithValue("$h", hash);
-            insert.Parameters.AddWithValue("$p", path);
-            insert.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
-            insert.Parameters.AddWithValue("$asset", (object?)immichAssetId ?? DBNull.Value);
-            insert.ExecuteNonQuery();
+            using var tx = _conn.BeginTransaction();
+            try
+            {
+                using var insert = _conn.CreateCommand();
+                insert.Transaction = tx;
+                insert.CommandText = @"
+                    INSERT OR IGNORE INTO uploaded (file_hash, source_path, uploaded_at, immich_asset_id)
+                    VALUES ($h, $p, $now, $asset);";
+                insert.Parameters.AddWithValue("$h", hash);
+                insert.Parameters.AddWithValue("$p", path);
+                insert.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
+                insert.Parameters.AddWithValue("$asset", (object?)immichAssetId ?? DBNull.Value);
+                insert.ExecuteNonQuery();
 
-            using var delete = _conn.CreateCommand();
-            delete.CommandText = "DELETE FROM queue WHERE id = $id;";
-            delete.Parameters.AddWithValue("$id", id);
-            delete.ExecuteNonQuery();
+                using var delete = _conn.CreateCommand();
+                delete.Transaction = tx;
+                delete.CommandText = "DELETE FROM queue WHERE id = $id;";
+                delete.Parameters.AddWithValue("$id", id);
+                delete.ExecuteNonQuery();
+
+                tx.Commit();
+            }
+            catch
+            {
+                tx.Rollback();
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reverts files that were dequeued as 'Uploading' back to 'Pending'
+    /// if a batch was interrupted, cancelled, or stopped on error.
+    /// </summary>
+    public void RevertToPending(IEnumerable<long> ids)
+    {
+        var idList = ids.ToList();
+        if (idList.Count == 0) return;
+
+        lock (_lock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = $"UPDATE queue SET status = 'Pending', updated_at = $now WHERE id IN ({string.Join(",", idList)}) AND status = 'Uploading';";
+            cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
+            cmd.ExecuteNonQuery();
         }
     }
 

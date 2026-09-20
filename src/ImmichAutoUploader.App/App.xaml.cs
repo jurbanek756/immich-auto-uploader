@@ -63,7 +63,9 @@ public partial class App : System.Windows.Application
         Engine.NotifyUser = msg => _tray?.Notify(msg, System.Windows.Forms.ToolTipIcon.Warning);
         Engine.Start();
 
-        ShowSettings();
+        if (!e.Args.Contains("--tray", StringComparer.OrdinalIgnoreCase))
+            ShowSettings();
+
         base.OnStartup(e);
     }
 

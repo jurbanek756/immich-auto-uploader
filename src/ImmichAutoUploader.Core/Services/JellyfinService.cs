@@ -63,13 +63,31 @@ public static class JellyfinService
         }
 
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
-        foreach (var lib in doc.RootElement.EnumerateArray())
+        JsonElement itemsElement;
+        if (doc.RootElement.ValueKind == JsonValueKind.Array)
+        {
+            itemsElement = doc.RootElement;
+        }
+        else if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                 doc.RootElement.TryGetProperty("Items", out var items) &&
+                 items.ValueKind == JsonValueKind.Array)
+        {
+            itemsElement = items;
+        }
+        else
+        {
+            return null;
+        }
+
+        foreach (var lib in itemsElement.EnumerateArray())
         {
             if (lib.TryGetProperty("Name", out var name) &&
-                string.Equals(name.GetString(), libraryName, StringComparison.OrdinalIgnoreCase) &&
-                lib.TryGetProperty("Id", out var id))
+                string.Equals(name.GetString(), libraryName, StringComparison.OrdinalIgnoreCase))
             {
-                return id.GetString();
+                if (lib.TryGetProperty("Id", out var id))
+                    return id.GetString();
+                if (lib.TryGetProperty("ItemId", out var itemId))
+                    return itemId.GetString();
             }
         }
         return null;

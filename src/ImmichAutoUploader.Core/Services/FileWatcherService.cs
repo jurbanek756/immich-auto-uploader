@@ -43,6 +43,7 @@ public sealed class FileWatcherService : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _settleTask;
     private readonly TimeSpan _settleDelay = TimeSpan.FromSeconds(5);
+    private readonly SemaphoreSlim _hashGate = new(4, 4);
     private bool _disposed;
 
     public FileWatcherService(string watchFolder, string doneFolder, UploadQueue queue)
@@ -109,6 +110,10 @@ public sealed class FileWatcherService : IDisposable
                 return; // we only care about files
         }
         catch { return; }
+
+        if (IsTempFile(path) || !IsMediaFile(path) || IsUnderDoneFolder(path))
+            return;
+
         _pending[path] = (DateTime.UtcNow, GetSizeSafe(path));
     }
 
@@ -168,12 +173,13 @@ public sealed class FileWatcherService : IDisposable
             }
 
             _pending.TryRemove(path, out _);
-            _ = Task.Run(() => EnqueueAndLogAsync(path)); // hashing can be slow; don't block the loop
+            _ = Task.Run(() => EnqueueAndLogAsync(path)); // hashing can be slow; throttled by _hashGate
         }
     }
 
     private async Task EnqueueAndLogAsync(string path)
     {
+        await _hashGate.WaitAsync(_cts.Token).ConfigureAwait(false);
         try
         {
             var result = await _queue.TryEnqueueAsync(path, _cts.Token).ConfigureAwait(false);
@@ -202,6 +208,10 @@ public sealed class FileWatcherService : IDisposable
         {
             AppLogger.Error($"Failed to queue {path}.", ex);
         }
+        finally
+        {
+            _hashGate.Release();
+        }
     }
 
     private async Task InitialScanAsync(CancellationToken ct)
@@ -221,10 +231,16 @@ public sealed class FileWatcherService : IDisposable
                 try { files = Directory.GetFiles(dir); }
                 catch { continue; }
 
-                foreach (string sub in subdirs) stack.Push(sub);
+                foreach (string sub in subdirs)
+                {
+                    if (!IsUnderDoneFolder(sub))
+                        stack.Push(sub);
+                }
                 foreach (string f in files)
                 {
                     if (ct.IsCancellationRequested) return;
+                    if (IsTempFile(f) || !IsMediaFile(f) || IsUnderDoneFolder(f))
+                        continue;
                     _pending[f] = (DateTime.UtcNow, GetSizeSafe(f));
                     if (++found % 500 == 0)
                         await Task.Yield();
@@ -267,6 +283,7 @@ public sealed class FileWatcherService : IDisposable
         try { _settleTask.Wait(TimeSpan.FromSeconds(5)); }
         catch { /* best effort */ }
         _watcher.Dispose();
+        _hashGate.Dispose();
         _cts.Dispose();
         AppLogger.Info("File watcher stopped.");
     }
