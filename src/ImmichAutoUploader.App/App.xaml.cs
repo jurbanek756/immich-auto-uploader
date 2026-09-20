@@ -23,12 +23,14 @@ public partial class App : System.Windows.Application
     protected override void OnStartup(StartupEventArgs e)
     {
         // Only one instance may run: a second watcher on the same folder would double-upload.
+        _singleInstance = new Mutex(false, @"Local\ImmichAutoUploader_SingleInstance");
         try
         {
-            _singleInstance = new Mutex(initiallyOwned: true, "ImmichAutoUploader_SingleInstance", out _ownsMutex);
+            _ownsMutex = _singleInstance.WaitOne(TimeSpan.Zero, false);
         }
         catch (AbandonedMutexException)
         {
+            // Previous instance crashed while holding the mutex; we now own it.
             _ownsMutex = true;
         }
 
@@ -43,6 +45,7 @@ public partial class App : System.Windows.Application
         AppLogger.PurgeOldLogs();
 
         Settings = SettingsService.Load();
+        ImmichAutoUploader.App.MainWindow.ApplyStartWithWindows(Settings.StartWithWindows);
         ResolveImmichGoPath();
 
         // Persistent queue + crash recovery, then start watching the folder.

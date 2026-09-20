@@ -58,7 +58,7 @@ public static class JellyfinService
         }
     }
 
-    private static async Task<string?> FindLibraryIdAsync(
+    internal static async Task<string?> FindLibraryIdAsync(
         HttpClient http, string baseUrl, string apiKey, string libraryName, CancellationToken ct)
     {
         using var req = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/Library/MediaFolders");

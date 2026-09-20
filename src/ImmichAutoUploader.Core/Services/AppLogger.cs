@@ -8,6 +8,7 @@ namespace ImmichAutoUploader.Core.Services;
 public static class AppLogger
 {
     private static readonly object _lock = new();
+    private static bool _dirEnsured;
 
     private static string LogDir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -44,8 +45,12 @@ public static class AppLogger
         {
             lock (_lock)
             {
-                if (!Directory.Exists(LogDir))
-                    Directory.CreateDirectory(LogDir);
+                if (!_dirEnsured)
+                {
+                    if (!Directory.Exists(LogDir))
+                        Directory.CreateDirectory(LogDir);
+                    _dirEnsured = true;
+                }
                 string path = Path.Combine(LogDir, $"app-{DateTime.Now:yyyyMMdd}.log");
                 File.AppendAllText(path,
                     $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} [{level}] {message}{Environment.NewLine}");

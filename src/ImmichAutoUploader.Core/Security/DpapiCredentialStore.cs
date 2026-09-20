@@ -36,10 +36,20 @@ public sealed class DpapiCredentialStore : ICredentialStore
         if (!File.Exists(path))
             return null;
 
-        byte[] protectedBytes = File.ReadAllBytes(path);
-        byte[] clearBytes = ProtectedData.Unprotect(
-            protectedBytes, optionalEntropy: null, DataProtectionScope.CurrentUser);
-        return Encoding.UTF8.GetString(clearBytes);
+        try
+        {
+            byte[] protectedBytes = File.ReadAllBytes(path);
+            if (protectedBytes.Length == 0)
+                return null;
+
+            byte[] clearBytes = ProtectedData.Unprotect(
+                protectedBytes, optionalEntropy: null, DataProtectionScope.CurrentUser);
+            return Encoding.UTF8.GetString(clearBytes);
+        }
+        catch (CryptographicException)
+        {
+            return null;
+        }
     }
 
     public void Delete(string name)

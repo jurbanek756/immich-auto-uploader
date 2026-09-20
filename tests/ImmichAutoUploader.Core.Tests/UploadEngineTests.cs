@@ -113,4 +113,24 @@ public class UploadEngineTests : IDisposable
         Assert.False(File.Exists(sourceFile));
         Assert.True(File.Exists(expectedDest));
     }
+
+    [Fact]
+    public async Task MoveToDoneAsync_WhenDoneFolderIsConfigured_MovesAndCleansSource()
+    {
+        string sourceFile = Path.Combine(_watchDir, "test_photo.jpg");
+        File.WriteAllBytes(sourceFile, new byte[] { 42, 43, 44 });
+
+        var settings = new AppSettings
+        {
+            WatchFolder = _watchDir,
+            DoneFolder = _doneDir,
+        };
+
+        await UploadEngine.MoveToDoneAsync(sourceFile, settings);
+
+        string expectedDest = Path.Combine(_doneDir, "test_photo.jpg");
+        Assert.False(File.Exists(sourceFile));
+        Assert.True(File.Exists(expectedDest));
+        Assert.Equal(new byte[] { 42, 43, 44 }, File.ReadAllBytes(expectedDest));
+    }
 }

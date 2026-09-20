@@ -26,8 +26,8 @@ public sealed record UploadResult(bool Success, int ExitCode, string ErrorDetail
 /// as a non-zero exit; the app-level OnErrors setting ("continue"/"stop") is
 /// applied by the engine across files instead.
 /// <para/>
-/// Secrets go on the command line: this immich-go fork documents no
-/// environment-variable alternative for the API keys.
+/// Secrets: IMMICH_API_KEY is passed via environment variable to protect it from
+/// process listing and event log auditing. Admin API key is passed via flag when present.
 /// </summary>
 public static class ImmichGoRunner
 {
@@ -39,7 +39,6 @@ public static class ImmichGoRunner
         {
             "upload",
             "--server", req.ServerUrl,
-            "--api-key", req.ApiKey,
             "--on-errors", "stop",
             "--concurrent-tasks", "1",
             "--pause-immich-jobs", req.PauseJobs ? "true" : "false",
@@ -53,10 +52,15 @@ public static class ImmichGoRunner
         }
         args.Add(req.FilePath);
 
+        var env = new Dictionary<string, string>
+        {
+            ["IMMICH_API_KEY"] = req.ApiKey
+        };
+
         ProcessHelper.Result r;
         try
         {
-            r = await ProcessHelper.RunAsync(req.ExePath, args, PerFileTimeoutMs, ct).ConfigureAwait(false);
+            r = await ProcessHelper.RunAsync(req.ExePath, args, PerFileTimeoutMs, env, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {

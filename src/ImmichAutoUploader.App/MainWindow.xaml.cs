@@ -15,6 +15,11 @@ public partial class MainWindow : Window
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValueName = "ImmichAutoUploader";
 
+    private static readonly HttpClient SharedTestClient = new(new SocketsHttpHandler
+    {
+        PooledConnectionLifetime = TimeSpan.FromMinutes(15)
+    }) { Timeout = TimeSpan.FromSeconds(15) };
+
     public MainWindow()
     {
         InitializeComponent();
@@ -220,10 +225,9 @@ public partial class MainWindow : Window
             string immichWho;
             try
             {
-                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
                 using var req = new HttpRequestMessage(HttpMethod.Get, url + "/api/users/me");
                 req.Headers.Add("x-api-key", apiKey);
-                using var resp = await http.SendAsync(req);
+                using var resp = await SharedTestClient.SendAsync(req);
 
                 if (!resp.IsSuccessStatusCode)
                 {
@@ -263,10 +267,9 @@ public partial class MainWindow : Window
 
                 try
                 {
-                    using var jfHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
                     using var jfReq = new HttpRequestMessage(HttpMethod.Get, jellyfinUrl + "/System/Info");
                     jfReq.Headers.Add("Authorization", $"MediaBrowser Token=\"{jellyfinKey}\"");
-                    using var jfResp = await jfHttp.SendAsync(jfReq);
+                    using var jfResp = await SharedTestClient.SendAsync(jfReq);
 
                     if (!jfResp.IsSuccessStatusCode)
                     {
@@ -300,7 +303,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private static void ApplyStartWithWindows(bool enable)
+    internal static void ApplyStartWithWindows(bool enable)
     {
         using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
         if (key is null) return;

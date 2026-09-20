@@ -75,7 +75,8 @@ public sealed class UploadEngine : IDisposable
         finally
         {
             lock (_batchTaskLock) { _activeBatchTask = null; }
-            _batchLock.Release();
+            try { _batchLock.Release(); }
+            catch (ObjectDisposedException) { /* shutting down */ }
         }
     }
 
@@ -102,7 +103,8 @@ public sealed class UploadEngine : IDisposable
                 finally
                 {
                     lock (_batchTaskLock) { _activeBatchTask = null; }
-                    _batchLock.Release();
+                    try { _batchLock.Release(); }
+                    catch (ObjectDisposedException) { /* shutting down */ }
                 }
             }
         }
@@ -381,7 +383,7 @@ public sealed class UploadEngine : IDisposable
                 try
                 {
                     string target = DedupePath(dest);
-                    File.Move(sourcePath, target);
+                    MoveOrCopyFile(sourcePath, target);
                     return;
                 }
                 catch (IOException) when (attempt < 4)
@@ -413,6 +415,33 @@ public sealed class UploadEngine : IDisposable
         }
     }
 
+    private static void MoveOrCopyFile(string source, string destination)
+    {
+        bool isCrossVolume = !string.Equals(
+            Path.GetPathRoot(Path.GetFullPath(source)),
+            Path.GetPathRoot(Path.GetFullPath(destination)),
+            StringComparison.OrdinalIgnoreCase);
+
+        if (isCrossVolume)
+        {
+            File.Copy(source, destination, overwrite: false);
+            File.Delete(source);
+        }
+        else
+        {
+            try
+            {
+                File.Move(source, destination);
+            }
+            catch (IOException)
+            {
+                // Handles volume mount points / junction edges
+                File.Copy(source, destination, overwrite: false);
+                File.Delete(source);
+            }
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
@@ -425,7 +454,15 @@ public sealed class UploadEngine : IDisposable
         try { Task.WaitAll(tasksToWait, TimeSpan.FromSeconds(25)); }
         catch { /* best effort */ }
 
-        _batchLock.Dispose();
+        try
+        {
+            if (_batchLock.Wait(TimeSpan.FromSeconds(5)))
+            {
+                _batchLock.Dispose();
+            }
+        }
+        catch (ObjectDisposedException) { }
+
         _cts.Dispose();
         AppLogger.Info("Upload engine stopped.");
     }

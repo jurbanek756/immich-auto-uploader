@@ -12,10 +12,18 @@ internal static class ProcessHelper
 {
     public sealed record Result(int ExitCode, string StdOut, string StdErr, bool TimedOut);
 
+    public static Task<Result> RunAsync(
+        string exePath,
+        IEnumerable<string> args,
+        int timeoutMs,
+        CancellationToken ct = default) =>
+        RunAsync(exePath, args, timeoutMs, environment: null, ct);
+
     public static async Task<Result> RunAsync(
         string exePath,
         IEnumerable<string> args,
         int timeoutMs,
+        IDictionary<string, string>? environment,
         CancellationToken ct = default)
     {
         using var process = new Process();
@@ -26,6 +34,12 @@ internal static class ProcessHelper
         process.StartInfo.RedirectStandardError = true;
         foreach (string a in args)
             process.StartInfo.ArgumentList.Add(a);
+
+        if (environment != null)
+        {
+            foreach (var (k, v) in environment)
+                process.StartInfo.EnvironmentVariables[k] = v;
+        }
 
         using var timeoutCts = new CancellationTokenSource(timeoutMs);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
@@ -53,12 +67,23 @@ internal static class ProcessHelper
             {
                 // When cancellation/timeout fires, the register callback kills the process tree.
                 // Ensure the process has completely exited so output pipes close cleanly.
-                try { await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false); }
-                catch { /* already gone */ }
+                try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false); }
+                catch { /* already gone or timed out */ }
             }
 
-            string stdOut = await stdOutTask.ConfigureAwait(false);
-            string stdErr = await stdErrTask.ConfigureAwait(false);
+            string stdOut = string.Empty;
+            string stdErr = string.Empty;
+            try
+            {
+                stdOut = await stdOutTask.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+            }
+            catch { /* best effort on timeout / cancellation */ }
+
+            try
+            {
+                stdErr = await stdErrTask.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+            }
+            catch { /* best effort on timeout / cancellation */ }
 
             if (ct.IsCancellationRequested)
                 throw new OperationCanceledException(ct);

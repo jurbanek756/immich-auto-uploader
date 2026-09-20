@@ -46,15 +46,16 @@ public sealed class UploadQueue : IDisposable
             using var cmd = _conn.CreateCommand();
             cmd.CommandText = @"
                 CREATE TABLE IF NOT EXISTS queue (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    source_path TEXT NOT NULL,
-                    file_hash   TEXT NOT NULL,
-                    file_size   INTEGER NOT NULL DEFAULT 0,
-                    status      TEXT NOT NULL DEFAULT 'Pending',
-                    attempts    INTEGER NOT NULL DEFAULT 0,
-                    last_error  TEXT,
-                    detected_at TEXT NOT NULL,
-                    updated_at  TEXT NOT NULL
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_path   TEXT NOT NULL,
+                    file_hash     TEXT NOT NULL,
+                    file_size     INTEGER NOT NULL DEFAULT 0,
+                    status        TEXT NOT NULL DEFAULT 'Pending',
+                    attempts      INTEGER NOT NULL DEFAULT 0,
+                    last_error    TEXT,
+                    next_retry_at TEXT,
+                    detected_at   TEXT NOT NULL,
+                    updated_at    TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_queue_status ON queue(status);
                 CREATE TABLE IF NOT EXISTS uploaded (
@@ -90,6 +91,10 @@ public sealed class UploadQueue : IDisposable
                 alter.CommandText = "ALTER TABLE queue ADD COLUMN next_retry_at TEXT;";
                 alter.ExecuteNonQuery();
             }
+
+            using var idxCmd = _conn.CreateCommand();
+            idxCmd.CommandText = "CREATE INDEX IF NOT EXISTS idx_queue_status_retry_detected ON queue(status, next_retry_at, detected_at);";
+            idxCmd.ExecuteNonQuery();
         }
     }
 
@@ -121,6 +126,7 @@ public sealed class UploadQueue : IDisposable
 
         lock (_lock)
         {
+            ThrowIfDisposed();
             if (ExistsInUploaded(hash))
                 return EnqueueResult.AlreadyUploaded;
 
@@ -170,14 +176,6 @@ public sealed class UploadQueue : IDisposable
         return cmd.ExecuteScalar() is not null;
     }
 
-    private bool ExistsInQueue(string hash)
-    {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT 1 FROM queue WHERE file_hash = $h AND status IN ('Pending','Uploading','Failed') LIMIT 1;";
-        cmd.Parameters.AddWithValue("$h", hash);
-        return cmd.ExecuteScalar() is not null;
-    }
-
     private static async Task<string> ComputeHashAsync(string path, CancellationToken ct)
     {
         using var sha = SHA256.Create();
@@ -195,6 +193,7 @@ public sealed class UploadQueue : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             var batch = new List<QueuedFile>();
             string now = DateTime.UtcNow.ToString("o");
             using var select = _conn.CreateCommand();
@@ -244,6 +243,7 @@ public sealed class UploadQueue : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             using var cmd = _conn.CreateCommand();
             cmd.CommandText = "SELECT COUNT(*) FROM queue WHERE (status = 'Pending' OR (status = 'Failed' AND next_retry_at <= $now)) AND (next_retry_at IS NULL OR next_retry_at <= $now);";
             cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
@@ -255,6 +255,7 @@ public sealed class UploadQueue : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             string? hash = null, path = null;
             using (var select = _conn.CreateCommand())
             {
@@ -310,6 +311,7 @@ public sealed class UploadQueue : IDisposable
 
         lock (_lock)
         {
+            ThrowIfDisposed();
             using var cmd = _conn.CreateCommand();
             cmd.CommandText = $"UPDATE queue SET status = 'Pending', updated_at = $now WHERE id IN ({string.Join(",", idList)}) AND status = 'Uploading';";
             cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
@@ -321,6 +323,7 @@ public sealed class UploadQueue : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             int attempts = 0;
             using (var get = _conn.CreateCommand())
             {
@@ -354,6 +357,7 @@ public sealed class UploadQueue : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             using var cmd = _conn.CreateCommand();
             cmd.CommandText = "UPDATE queue SET status = 'Pending', next_retry_at = NULL, updated_at = $now WHERE status = 'Failed';";
             cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
@@ -369,6 +373,7 @@ public sealed class UploadQueue : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             using var cmd = _conn.CreateCommand();
             cmd.CommandText = "UPDATE queue SET status = 'Pending', next_retry_at = NULL, updated_at = $now WHERE status = 'Uploading';";
             cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
@@ -380,6 +385,7 @@ public sealed class UploadQueue : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             int Count(string sql)
             {
                 using var cmd = _conn.CreateCommand();
@@ -402,6 +408,7 @@ public sealed class UploadQueue : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             using var cmd = _conn.CreateCommand();
             cmd.CommandText = "DELETE FROM queue WHERE id = $id;";
             cmd.Parameters.AddWithValue("$id", id);
@@ -411,8 +418,16 @@ public sealed class UploadQueue : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        _conn.Dispose();
+        lock (_lock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _conn.Dispose();
+        }
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(UploadQueue));
     }
 }

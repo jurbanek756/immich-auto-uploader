@@ -210,7 +210,7 @@ public sealed class FileWatcherService : IDisposable
     {
         try
         {
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             return true;
         }
         catch (IOException)
