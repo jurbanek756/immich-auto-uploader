@@ -215,7 +215,7 @@ public sealed class UploadEngine : IDisposable
             var sw = Stopwatch.StartNew();
             int parallelism = Math.Clamp(s.ConcurrentTasks, 1, 20);
             using var gate = new SemaphoreSlim(parallelism, parallelism);
-            bool stopRequested = false;
+            int stopRequested = 0;
             var processedIds = new System.Collections.Concurrent.ConcurrentBag<long>();
 
             var tasks = batch.Select(async file =>
@@ -223,7 +223,7 @@ public sealed class UploadEngine : IDisposable
                 await gate.WaitAsync(ct).ConfigureAwait(false);
                 try
                 {
-                    if (stopRequested || ct.IsCancellationRequested)
+                    if (Volatile.Read(ref stopRequested) == 1 || ct.IsCancellationRequested)
                         return;
 
                     var outcome = await ProcessFileAsync(file, s, creds, serverUrl, ct).ConfigureAwait(false);
@@ -236,7 +236,7 @@ public sealed class UploadEngine : IDisposable
                         case ProcessOutcome.Failed:
                             Interlocked.Increment(ref failed);
                             if (string.Equals(s.OnErrors, "stop", StringComparison.OrdinalIgnoreCase))
-                                stopRequested = true;
+                                Interlocked.Exchange(ref stopRequested, 1);
                             break;
                         case ProcessOutcome.Skipped:
                             break;
@@ -407,7 +407,9 @@ public sealed class UploadEngine : IDisposable
         try
         {
             // 1. Calculate relative destination path to preserve directory structure
-            string relative = Path.GetRelativePath(s.WatchFolder, sourcePath);
+            string relative = string.IsNullOrWhiteSpace(s.WatchFolder)
+                ? Path.GetFileName(sourcePath)
+                : Path.GetRelativePath(s.WatchFolder, sourcePath);
             if (Path.IsPathRooted(relative) || relative.StartsWith("..", StringComparison.Ordinal))
                 relative = Path.GetFileName(sourcePath); // Cross-volume or outside watch folder: fall back to flat move
 
@@ -418,15 +420,13 @@ public sealed class UploadEngine : IDisposable
 
             bool copySucceeded = false;
             string? lastTarget = null;
+            string target = DedupePath(dest);
 
             // 2. Retry loop (up to 5 attempts) to accommodate antivirus scanners or transient sharing violations
             for (int attempt = 0; attempt < 5; attempt++)
             {
                 try
                 {
-                    string target = DedupePath(dest);
-                    lastTarget = target;
-
                     // Check whether source and target share the same drive volume
                     bool isCrossVolume = !string.Equals(
                         Path.GetPathRoot(Path.GetFullPath(sourcePath)),
@@ -444,6 +444,7 @@ public sealed class UploadEngine : IDisposable
                     {
                         File.Copy(sourcePath, target, overwrite: false);
                         copySucceeded = true;
+                        lastTarget = target;
                     }
 
                     // Delete the original source file after successful copy

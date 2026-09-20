@@ -23,6 +23,8 @@ public partial class App : System.Windows.Application
 {
     private Mutex? _singleInstance;
     private bool _ownsMutex;
+    private EventWaitHandle? _showSettingsSignal;
+    private RegisteredWaitHandle? _showSettingsRegistration;
     private TrayIconManager? _tray;
     private FileWatcherService? _fileWatcher;
 
@@ -71,20 +73,46 @@ public partial class App : System.Windows.Application
 
         if (!_ownsMutex)
         {
-            IntPtr hWnd = FindWindow(null, "Immich Auto Uploader — Settings");
-            if (hWnd != IntPtr.Zero)
+            try
             {
-                ShowWindow(hWnd, SW_RESTORE);
-                SetForegroundWindow(hWnd);
+                using var signal = EventWaitHandle.OpenExisting(@"Local\ImmichAutoUploader_ShowSettingsSignal");
+                signal.Set();
             }
-            else
+            catch
             {
-                System.Windows.MessageBox.Show("Immich Auto Uploader is already running (check the system tray).",
-                    "Immich Auto Uploader", MessageBoxButton.OK, MessageBoxImage.Information);
+                IntPtr hWnd = FindWindow(null, "Immich Auto Uploader — Settings");
+                if (hWnd != IntPtr.Zero)
+                {
+                    ShowWindow(hWnd, SW_RESTORE);
+                    SetForegroundWindow(hWnd);
+                }
+                else
+                {
+                    System.Windows.MessageBox.Show("Immich Auto Uploader is already running (check the system tray).",
+                        "Immich Auto Uploader", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
             }
             Shutdown();
             return;
         }
+
+        try
+        {
+            _showSettingsSignal = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\ImmichAutoUploader_ShowSettingsSignal");
+            _showSettingsRegistration = ThreadPool.RegisterWaitForSingleObject(
+                _showSettingsSignal,
+                (state, timedOut) =>
+                {
+                    if (!timedOut)
+                    {
+                        Dispatcher.Invoke(ShowSettings);
+                    }
+                },
+                null,
+                -1,
+                false);
+        }
+        catch { /* best effort activation signal */ }
 
         AppLogger.PurgeOldLogs();
 
@@ -214,6 +242,8 @@ public partial class App : System.Windows.Application
     /// <param name="e">Exit event arguments.</param>
     protected override void OnExit(ExitEventArgs e)
     {
+        _showSettingsRegistration?.Unregister(null);
+        _showSettingsSignal?.Dispose();
         Engine?.Dispose();
         _fileWatcher?.Dispose();
         Queue?.Dispose();

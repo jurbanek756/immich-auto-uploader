@@ -36,9 +36,9 @@ public static class AppLogger
     /// Writes an error message and optional exception details to the current daily log file.
     /// </summary>
     /// <param name="message">The error description.</param>
-    /// <param name="ex">Optional exception whose type and message will be appended.</param>
+    /// <param name="ex">Optional exception whose type, message, and stack trace will be appended.</param>
     public static void Error(string message, Exception? ex = null) =>
-        Write("ERROR", ex is null ? message : $"{message} | {ex.GetType().Name}: {ex.Message}");
+        Write("ERROR", ex is null ? message : $"{message} | {ex}");
 
     /// <summary>
     /// Deletes log files whose last modification timestamp exceeds the specified retention threshold.

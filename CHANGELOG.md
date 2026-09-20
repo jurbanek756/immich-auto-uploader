@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v1.0.3] - 2026-09-20
+
+### Fixed
+- **Concurrency & Settle Loop Hardening**:
+  - Fixed settle loop sentinel race condition in `FileWatcherService` where fast worker tasks could miss the sentinel and leave items permanently trapped in `_pending`.
+  - Added volatile memory barrier semantics to `stopRequested` flag in `UploadEngine` across parallel worker tasks.
+  - Protected in-flight hashing sentinels from being reset during `InitialScanAsync` directory rescans.
+- **Data Integrity & Move-to-Done**:
+  - Fixed cross-volume move failure in `UploadEngine.MoveToDoneAsync` where `DedupePath` mutated `lastTarget` during retries, ensuring the actual copied file is cleaned up if source deletion fails.
+  - Handled empty or whitespace `WatchFolder` gracefully, avoiding `ArgumentException` in `Path.GetRelativePath`.
+- **Security & Secrets Protection**:
+  - Replaced hardcoded personal DuckDNS domain in default `AppSettings.ImmichUrl` with standard generic default (`http://localhost:2283`).
+  - Added path traversal validation to `DpapiCredentialStore.PathFor` rejecting invalid or directory-escaping slot names.
+- **Database Hygiene & Performance**:
+  - Added `idx_queue_source_path` index to `queue(source_path)` eliminating full table scans during file intake.
+  - Removed redundant single-column `idx_queue_status` index in favor of the composite index `idx_queue_status_retry_detected`.
+  - Handled TOCTOU file-not-found exceptions in `UploadQueue.TryEnqueueAsync` returning `EnqueueResult.FileNotFound`.
+  - Preserved `DateTimeKind.Utc` when parsing `DetectedAt` timestamps in `UploadQueue.DequeueBatch`.
+- **Platform & Diagnostics**:
+  - Preserved full exception details and stack traces in `AppLogger.Error`.
+  - Added user-level `%LocalAppData%\Tailscale\tailscale.exe` discovery path in `TailscaleService`.
+  - Implemented `EventWaitHandle` single-instance activation signal (`Local\ImmichAutoUploader_ShowSettingsSignal`) to restore settings window when launching subsequent instances without `--tray`.
+
+## [v1.0.2] - 2026-09-20
+
+### Fixed
+- Windows x86_64 asset matching in `build.ps1`.
+
 ## [v1.0.1] - 2026-09-20
 
 ### Added

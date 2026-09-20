@@ -67,6 +67,11 @@ public static class TailscaleService
         if (File.Exists(def))
             return def;
 
+        string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string localDef = Path.Combine(localAppData, "Tailscale", "tailscale.exe");
+        if (File.Exists(localDef))
+            return localDef;
+
         try
         {
             var r = await ProcessHelper.RunAsync("where.exe", new[] { "tailscale" }, 10_000, ct).ConfigureAwait(false);

@@ -273,15 +273,12 @@ public sealed class FileWatcherService : IDisposable
             }
 
             // 6. Enqueue Hand-off: Write to the bounded channel.
-            // Mark lastEvent = DateTime.MaxValue as a sentinel.
-            // This prevents duplicate channel writes while workers hash the file.
-            if (_enqueueChannel.Writer.TryWrite(path))
+            // Mark lastEvent = DateTime.MaxValue as a sentinel BEFORE writing to the channel.
+            // This eliminates the race where a worker finishes before the sentinel is set.
+            _pending[path] = (DateTime.MaxValue, size, true);
+            if (!_enqueueChannel.Writer.TryWrite(path))
             {
-                _pending[path] = (DateTime.MaxValue, size, true);
-            }
-            else
-            {
-                // Channel is full (backpressure). Mark as available so we don't repeatedly open file handles every tick.
+                // Channel is full (backpressure). Revert sentinel so we re-evaluate on next tick without re-opening handles.
                 _pending[path] = (now - _settleDelay, size, true);
             }
         }
@@ -430,6 +427,9 @@ public sealed class FileWatcherService : IDisposable
                 {
                     if (ct.IsCancellationRequested) return;
                     if (IsTempFile(f) || !IsMediaFile(f) || IsUnderDoneFolder(f))
+                        continue;
+                    // Do not reset the sentinel timestamp if the file is currently being hashed in-flight
+                    if (_pending.TryGetValue(f, out var existing) && existing.lastEvent == DateTime.MaxValue)
                         continue;
                     _pending[f] = (DateTime.UtcNow, GetSizeSafe(f), false);
                     if (++found % 500 == 0)

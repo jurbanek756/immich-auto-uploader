@@ -170,4 +170,23 @@ public class UploadEngineTests : IDisposable
         var doneFiles = Directory.GetFiles(_doneDir);
         Assert.True(doneFiles.Length <= 1, $"Expected at most 1 file in Done folder, but found {doneFiles.Length}: {string.Join(", ", doneFiles)}");
     }
+
+    [Fact]
+    public async Task MoveToDoneAsync_WhenWatchFolderIsEmpty_DoesNotThrowAndMovesFile()
+    {
+        string sourceFile = Path.Combine(_watchDir, "empty_watch_photo.jpg");
+        File.WriteAllBytes(sourceFile, new byte[] { 1, 2, 3 });
+
+        var settings = new AppSettings
+        {
+            WatchFolder = "",
+            DoneFolder = _doneDir,
+        };
+
+        var ex = await Record.ExceptionAsync(() => UploadEngine.MoveToDoneAsync(sourceFile, settings));
+        Assert.Null(ex);
+        string expectedDest = Path.Combine(_doneDir, "empty_watch_photo.jpg");
+        Assert.True(File.Exists(expectedDest));
+        Assert.False(File.Exists(sourceFile));
+    }
 }
