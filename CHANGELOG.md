@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v1.0.4] - 2026-09-20
+
+### Fixed
+- **Database & Queue Concurrency**:
+  - Resolved potential SQLite unique constraint violation in `UploadQueue.TryEnqueueAsync` when a modified file's hash clashes with another already-queued file.
+  - Ensured `UploadQueue.RevertToPending` resets `next_retry_at = NULL` so reverted items are immediately eligible without retaining stale backoff timestamps.
+  - Guarded `UploadQueue.DequeueBatch` against non-positive (`<= 0`) count arguments.
+- **Process Execution & Resilience**:
+  - Handled `System.ComponentModel.Win32Exception` in `ProcessHelper.RunAsync` to ensure missing binaries return `ExitCode = -1` rather than throwing unhandled exceptions.
+  - Ensured `ProcessHelper.RunAsync` sets `ExitCode = -1` when execution times out.
+  - Avoided emitting empty `--device-uuid` arguments in `ImmichGoRunner.UploadSingleAsync`.
+  - Added login URL detection in `TailscaleService.GetBackendStateAsync` text fallback even when the literal phrase `"Logged out"` is absent.
+- **File Management & Logging**:
+  - Recomputed deduplicated destination target in `UploadEngine.MoveToDoneAsync` retry loop to prevent TOCTOU name collision failures.
+  - Made `AppLogger` self-healing by resetting `_dirEnsured = false` on write errors, ensuring log directory recreation if externally deleted.
+- **UI & Application Lifecycle**:
+  - Caught path parsing exceptions (`ArgumentException`, `NotSupportedException`, `PathTooLongException`) in `MainWindow.Save_Click` to prevent UI thread crashes on invalid path input.
+  - Guarded cross-thread activation signal registration against `Dispatcher` shutdown race conditions in `App.xaml.cs`.
+
 ## [v1.0.3] - 2026-09-20
 
 ### Fixed
