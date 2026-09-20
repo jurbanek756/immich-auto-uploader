@@ -10,6 +10,7 @@ namespace ImmichAutoUploader.App;
 public partial class App : System.Windows.Application
 {
     private Mutex? _singleInstance;
+    private bool _ownsMutex;
     private TrayIconManager? _tray;
     private FileWatcherService? _fileWatcher;
 
@@ -22,14 +23,24 @@ public partial class App : System.Windows.Application
     protected override void OnStartup(StartupEventArgs e)
     {
         // Only one instance may run: a second watcher on the same folder would double-upload.
-        _singleInstance = new Mutex(initiallyOwned: true, "ImmichAutoUploader_SingleInstance", out bool createdNew);
-        if (!createdNew)
+        try
+        {
+            _singleInstance = new Mutex(initiallyOwned: true, "ImmichAutoUploader_SingleInstance", out _ownsMutex);
+        }
+        catch (AbandonedMutexException)
+        {
+            _ownsMutex = true;
+        }
+
+        if (!_ownsMutex)
         {
             System.Windows.MessageBox.Show("Immich Auto Uploader is already running (check the system tray).",
                 "Immich Auto Uploader", MessageBoxButton.OK, MessageBoxImage.Information);
             Shutdown();
             return;
         }
+
+        AppLogger.PurgeOldLogs();
 
         Settings = SettingsService.Load();
         ResolveImmichGoPath();
@@ -148,8 +159,11 @@ public partial class App : System.Windows.Application
         _tray?.Dispose();
         if (_singleInstance is not null)
         {
-            try { _singleInstance.ReleaseMutex(); }
-            catch { /* not owned or already released */ }
+            if (_ownsMutex)
+            {
+                try { _singleInstance.ReleaseMutex(); }
+                catch { /* not owned or already released */ }
+            }
             _singleInstance.Dispose();
         }
         base.OnExit(e);

@@ -39,9 +39,10 @@ public sealed class FileWatcherService : IDisposable
     private readonly string _doneFolder;
     private readonly UploadQueue _queue;
     private readonly FileSystemWatcher _watcher;
-    private readonly ConcurrentDictionary<string, (DateTime lastEvent, long lastSize)> _pending =
+    private readonly ConcurrentDictionary<string, (DateTime lastEvent, long lastSize, bool isAvailable)> _pending =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly CancellationTokenSource _cts = new();
+    private Task? _initialScanTask;
     private readonly Task _settleTask;
     private readonly TimeSpan _settleDelay = TimeSpan.FromSeconds(5);
     private readonly Channel<string> _enqueueChannel = Channel.CreateBounded<string>(new BoundedChannelOptions(2000)
@@ -89,7 +90,7 @@ public sealed class FileWatcherService : IDisposable
             _workerTasks.Add(Task.Run(() => EnqueueWorkerLoopAsync(_cts.Token)));
         }
         AppLogger.Info($"Watching folder: {_watchFolder}");
-        Task.Run(() => InitialScanAsync(_cts.Token));
+        _initialScanTask = Task.Run(() => InitialScanAsync(_cts.Token));
     }
 
     // ------------------------------------------------------------------
@@ -125,7 +126,7 @@ public sealed class FileWatcherService : IDisposable
         if (IsTempFile(path) || !IsMediaFile(path) || IsUnderDoneFolder(path))
             return;
 
-        _pending[path] = (DateTime.UtcNow, GetSizeSafe(path));
+        _pending[path] = (DateTime.UtcNow, GetSizeSafe(path), false);
     }
 
     private async Task SettleLoopAsync(CancellationToken ct)
@@ -152,7 +153,7 @@ public sealed class FileWatcherService : IDisposable
         foreach (var kvp in _pending)
         {
             string path = kvp.Key;
-            var (lastEvent, lastSize) = kvp.Value;
+            var (lastEvent, lastSize, isAvailable) = kvp.Value;
 
             if (now - lastEvent < _settleDelay)
                 continue;
@@ -165,7 +166,7 @@ public sealed class FileWatcherService : IDisposable
             }
             if (size != lastSize)
             {
-                _pending[path] = (now, size); // still being written; wait more
+                _pending[path] = (now, size, false); // still being written; wait more
                 continue;
             }
             if (IsUnderDoneFolder(path))
@@ -183,16 +184,24 @@ public sealed class FileWatcherService : IDisposable
                 continue;
             }
 
-            if (!IsFileAvailable(path))
+            if (!isAvailable)
             {
-                _pending[path] = (now, size); // Writer still has the file open; wait more
-                continue;
+                if (!IsFileAvailable(path))
+                {
+                    _pending[path] = (now, size, false); // Writer still has the file open; wait more
+                    continue;
+                }
             }
 
             // Write to the bounded channel. Keep in _pending with sentinel timestamp until enqueued.
             if (_enqueueChannel.Writer.TryWrite(path))
             {
-                _pending[path] = (DateTime.MaxValue, size);
+                _pending[path] = (DateTime.MaxValue, size, true);
+            }
+            else
+            {
+                // Channel is full. Mark as available so we don't repeatedly open file handles every tick.
+                _pending[path] = (now - _settleDelay, size, true);
             }
         }
     }
@@ -270,13 +279,13 @@ public sealed class FileWatcherService : IDisposable
         catch (OperationCanceledException)
         {
             // shutting down: reset timestamp so it can be retried on next startup
-            _pending[path] = (DateTime.UtcNow, GetSizeSafe(path));
+            _pending[path] = (DateTime.UtcNow, GetSizeSafe(path), false);
         }
         catch (IOException ex)
         {
             // Transient lock or sharing violation: reset timestamp so it retries on next settle check
             AppLogger.Warn($"Transient I/O error queueing {path}, will retry: {ex.Message}");
-            _pending[path] = (DateTime.UtcNow, GetSizeSafe(path));
+            _pending[path] = (DateTime.UtcNow, GetSizeSafe(path), false);
         }
         catch (Exception ex)
         {
@@ -312,7 +321,7 @@ public sealed class FileWatcherService : IDisposable
                     if (ct.IsCancellationRequested) return;
                     if (IsTempFile(f) || !IsMediaFile(f) || IsUnderDoneFolder(f))
                         continue;
-                    _pending[f] = (DateTime.UtcNow, GetSizeSafe(f));
+                    _pending[f] = (DateTime.UtcNow, GetSizeSafe(f), false);
                     if (++found % 500 == 0)
                         await Task.Yield();
                 }
@@ -354,6 +363,8 @@ public sealed class FileWatcherService : IDisposable
         _cts.Cancel();
         _enqueueChannel.Writer.TryComplete();
         try { _settleTask.Wait(TimeSpan.FromSeconds(3)); }
+        catch { /* best effort */ }
+        try { _initialScanTask?.Wait(TimeSpan.FromSeconds(3)); }
         catch { /* best effort */ }
         try { Task.WaitAll(_workerTasks.ToArray(), TimeSpan.FromSeconds(5)); }
         catch { /* best effort */ }

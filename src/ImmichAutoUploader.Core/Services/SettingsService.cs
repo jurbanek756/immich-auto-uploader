@@ -15,9 +15,16 @@ public sealed class SettingsService
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     };
 
-    public static string SettingsPath => Path.Combine(
+    public static string DefaultSettingsPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "ImmichAutoUploader", "settings.json");
+
+    public string SettingsPath { get; }
+
+    public SettingsService(string? customPath = null)
+    {
+        SettingsPath = customPath ?? DefaultSettingsPath;
+    }
 
     public AppSettings Load()
     {
@@ -44,7 +51,9 @@ public sealed class SettingsService
         if (!string.IsNullOrEmpty(dir))
             Directory.CreateDirectory(dir);
 
+        string tempPath = SettingsPath + ".tmp";
         string json = JsonSerializer.Serialize(settings, JsonOptions);
-        File.WriteAllText(SettingsPath, json);
+        File.WriteAllText(tempPath, json);
+        File.Move(tempPath, SettingsPath, overwrite: true);
     }
 }

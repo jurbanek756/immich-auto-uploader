@@ -159,4 +159,76 @@ public class UploadQueueTests : IDisposable
         Assert.Equal(1, stats.Failed);
         Assert.Equal(0, stats.Pending);
     }
+
+    [Fact]
+    public async Task DequeueBatch_ReturnsFailedItemsWhenRetryBackoffExpired()
+    {
+        string file = CreateTempMediaFile("retry.jpg", new byte[] { 21, 22, 23 });
+        await _queue.TryEnqueueAsync(file);
+
+        var batch1 = _queue.DequeueBatch(10);
+        Assert.Single(batch1);
+
+        _queue.MarkFailed(batch1[0].Id, "Temporary timeout");
+
+        // Immediately after failure, retry time is in the future (+5 min); should not be due
+        Assert.Equal(0, _queue.CountDue());
+        var batch2 = _queue.DequeueBatch(10);
+        Assert.Empty(batch2);
+
+        // Simulate backoff expiration by setting next_retry_at in the past
+        using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_tempDbPath}"))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE queue SET next_retry_at = $past WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$past", DateTime.UtcNow.AddMinutes(-1).ToString("o"));
+            cmd.Parameters.AddWithValue("$id", batch1[0].Id);
+            cmd.ExecuteNonQuery();
+        }
+
+        // Now it should be due and dequeued
+        Assert.Equal(1, _queue.CountDue());
+        var batch3 = _queue.DequeueBatch(10);
+        Assert.Single(batch3);
+        Assert.Equal(batch1[0].Id, batch3[0].Id);
+        Assert.Equal("Uploading", batch3[0].Status);
+    }
+
+    [Fact]
+    public async Task TryEnqueueAsync_FileRenamedWhileQueued_UpdatesSourcePath()
+    {
+        string file1 = CreateTempMediaFile("initial.jpg", new byte[] { 31, 32, 33 });
+        var res1 = await _queue.TryEnqueueAsync(file1);
+        Assert.Equal(EnqueueResult.Enqueued, res1);
+
+        string file2 = Path.Combine(_tempTestDir, "renamed.jpg");
+        File.Move(file1, file2);
+
+        var res2 = await _queue.TryEnqueueAsync(file2);
+        Assert.Equal(EnqueueResult.Enqueued, res2);
+
+        var batch = _queue.DequeueBatch(10);
+        Assert.Single(batch);
+        Assert.Equal(file2, batch[0].SourcePath);
+    }
+
+    [Fact]
+    public async Task RequeueFailed_ResetsFailedItemsToPending()
+    {
+        string file = CreateTempMediaFile("failed.jpg", new byte[] { 41, 42, 43 });
+        await _queue.TryEnqueueAsync(file);
+
+        var batch = _queue.DequeueBatch(10);
+        _queue.MarkFailed(batch[0].Id, "Fatal connection error");
+
+        Assert.Equal(1, _queue.GetStats().Failed);
+
+        int requeued = _queue.RequeueFailed();
+        Assert.Equal(1, requeued);
+
+        var stats = _queue.GetStats();
+        Assert.Equal(1, stats.Pending);
+        Assert.Equal(0, stats.Failed);
+    }
 }

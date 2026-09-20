@@ -30,6 +30,8 @@ public sealed class UploadEngine : IDisposable
     private readonly Func<EngineCredentials> _getCredentials;
     private readonly CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _batchLock = new(1, 1);
+    private readonly object _batchTaskLock = new();
+    private Task? _activeBatchTask;
     private Task? _loopTask;
     private bool _disposed;
 
@@ -59,13 +61,20 @@ public sealed class UploadEngine : IDisposable
     {
         if (!await _batchLock.WaitAsync(0).ConfigureAwait(false))
             return false;
+        Task batchTask;
+        lock (_batchTaskLock)
+        {
+            batchTask = RunBatchCoreAsync(_cts.Token);
+            _activeBatchTask = batchTask;
+        }
         try
         {
-            await RunBatchCoreAsync(_cts.Token).ConfigureAwait(false);
+            await batchTask.ConfigureAwait(false);
             return true;
         }
         finally
         {
+            lock (_batchTaskLock) { _activeBatchTask = null; }
             _batchLock.Release();
         }
     }
@@ -80,12 +89,19 @@ public sealed class UploadEngine : IDisposable
                 await Task.Delay(TimeSpan.FromMinutes(minutes), ct).ConfigureAwait(false);
 
                 await _batchLock.WaitAsync(ct).ConfigureAwait(false);
+                Task batchTask;
+                lock (_batchTaskLock)
+                {
+                    batchTask = RunBatchCoreAsync(ct);
+                    _activeBatchTask = batchTask;
+                }
                 try
                 {
-                    await RunBatchCoreAsync(ct).ConfigureAwait(false);
+                    await batchTask.ConfigureAwait(false);
                 }
                 finally
                 {
+                    lock (_batchTaskLock) { _activeBatchTask = null; }
                     _batchLock.Release();
                 }
             }
@@ -170,15 +186,15 @@ public sealed class UploadEngine : IDisposable
                 serverUrl = s.ImmichUrlViaTailscale;
         }
 
-        if (s.PauseImmichJobs && string.IsNullOrEmpty(creds.ImmichAdminApiKey))
-            AppLogger.Warn("PauseImmichJobs is on but no admin API key is set; server jobs will not be paused.");
-
         try
         {
             // 2. Dequeue
             var batch = _queue.DequeueBatch(Math.Max(1, s.MaxFilesPerBatch));
             if (batch.Count == 0)
                 return;
+
+            if (s.PauseImmichJobs && string.IsNullOrEmpty(creds.ImmichAdminApiKey))
+                AppLogger.Warn("PauseImmichJobs is on but no admin API key is set; server jobs will not be paused.");
 
             // 3. Upload
             AppLogger.Info($"Upload batch started: {batch.Count} file(s) → {serverUrl}.");
@@ -321,7 +337,14 @@ public sealed class UploadEngine : IDisposable
         }
 
         _queue.MarkUploaded(file.Id);
-        await MoveToDoneAsync(file.SourcePath, s, ct).ConfigureAwait(false);
+        try
+        {
+            await MoveToDoneAsync(file.SourcePath, s, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"Uploaded, but could not move to Done folder: {file.SourcePath} — {ex.Message}");
+        }
         AppLogger.Info($"Uploaded: {file.SourcePath}");
         return ProcessOutcome.Uploaded;
     }
@@ -395,8 +418,13 @@ public sealed class UploadEngine : IDisposable
         if (_disposed) return;
         _disposed = true;
         _cts.Cancel();
-        try { _loopTask?.Wait(TimeSpan.FromSeconds(20)); }
+
+        Task? active;
+        lock (_batchTaskLock) { active = _activeBatchTask; }
+        var tasksToWait = new[] { _loopTask, active }.Where(t => t != null).Cast<Task>().ToArray();
+        try { Task.WaitAll(tasksToWait, TimeSpan.FromSeconds(25)); }
         catch { /* best effort */ }
+
         _batchLock.Dispose();
         _cts.Dispose();
         AppLogger.Info("Upload engine stopped.");

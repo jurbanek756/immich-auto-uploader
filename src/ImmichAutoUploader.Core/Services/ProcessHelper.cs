@@ -42,19 +42,34 @@ internal static class ProcessHelper
                 catch { /* already gone */ }
             });
 
-            var stdOutTask = process.StandardOutput.ReadToEndAsync(linkedCts.Token);
-            var stdErrTask = process.StandardError.ReadToEndAsync(linkedCts.Token);
-            await Task.WhenAll(stdOutTask, stdErrTask).ConfigureAwait(false);
+            var stdOutTask = process.StandardOutput.ReadToEndAsync();
+            var stdErrTask = process.StandardError.ReadToEndAsync();
+
+            try
+            {
+                await process.WaitForExitAsync(linkedCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // When cancellation/timeout fires, the register callback kills the process tree.
+                // Ensure the process has completely exited so output pipes close cleanly.
+                try { await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false); }
+                catch { /* already gone */ }
+            }
+
             string stdOut = await stdOutTask.ConfigureAwait(false);
             string stdErr = await stdErrTask.ConfigureAwait(false);
-            await process.WaitForExitAsync(linkedCts.Token).ConfigureAwait(false);
 
-            bool timedOut = timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested;
-            return new Result(process.ExitCode, stdOut, stdErr, timedOut);
+            if (ct.IsCancellationRequested)
+                throw new OperationCanceledException(ct);
+
+            bool timedOut = timeoutCts.IsCancellationRequested;
+            int exitCode = process.HasExited ? process.ExitCode : -1;
+            return new Result(exitCode, stdOut, stdErr, timedOut);
         }
-        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            return new Result(-1, string.Empty, "Process timed out.", true);
+            throw;
         }
     }
 

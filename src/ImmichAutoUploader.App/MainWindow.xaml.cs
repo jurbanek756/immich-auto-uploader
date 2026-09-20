@@ -132,6 +132,14 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (!string.IsNullOrWhiteSpace(TxtTailscaleUrl.Text) &&
+            (!Uri.TryCreate(TxtTailscaleUrl.Text.Trim(), UriKind.Absolute, out var tsUri) ||
+             (tsUri.Scheme != Uri.UriSchemeHttp && tsUri.Scheme != Uri.UriSchemeHttps)))
+        {
+            SetStatus("Immich URL via Tailscale must be a valid http:// or https:// URL.");
+            return;
+        }
+
         var s = new AppSettings
         {
             ImmichUrl = TxtUrl.Text.Trim().TrimEnd('/'),
@@ -329,6 +337,28 @@ public partial class MainWindow : Window
             SetStatus("Upload batch running…");
             bool started = await engine.TriggerNowAsync();
             SetStatus(started ? "Batch finished." : "A batch is already running; try again shortly.");
+            await RefreshQueueStatusAsync();
+        }
+        finally
+        {
+            if (btn is not null) btn.IsEnabled = true;
+        }
+    }
+
+    private async void RetryFailed_Click(object sender, RoutedEventArgs e)
+    {
+        var btn = sender as System.Windows.Controls.Button;
+        if (btn is not null) btn.IsEnabled = false;
+
+        try
+        {
+            if (App.Queue is null)
+            {
+                SetStatus("Upload queue is not initialized.");
+                return;
+            }
+            int requeued = App.Queue.RequeueFailed();
+            SetStatus($"Requeued {requeued} failed file(s) back to Pending.");
             await RefreshQueueStatusAsync();
         }
         finally

@@ -123,8 +123,30 @@ public sealed class UploadQueue : IDisposable
         {
             if (ExistsInUploaded(hash))
                 return EnqueueResult.AlreadyUploaded;
-            if (ExistsInQueue(hash))
-                return EnqueueResult.AlreadyQueued;
+
+            using (var checkCmd = _conn.CreateCommand())
+            {
+                checkCmd.CommandText = "SELECT id, source_path FROM queue WHERE file_hash = $h AND status IN ('Pending','Uploading','Failed') LIMIT 1;";
+                checkCmd.Parameters.AddWithValue("$h", hash);
+                using var reader = checkCmd.ExecuteReader();
+                if (reader.Read())
+                {
+                    long existingId = reader.GetInt64(0);
+                    string existingPath = reader.GetString(1);
+                    if (!string.Equals(existingPath, sourcePath, StringComparison.OrdinalIgnoreCase) && !File.Exists(existingPath))
+                    {
+                        reader.Close();
+                        using var updateCmd = _conn.CreateCommand();
+                        updateCmd.CommandText = "UPDATE queue SET source_path = $path, updated_at = $now WHERE id = $id;";
+                        updateCmd.Parameters.AddWithValue("$path", sourcePath);
+                        updateCmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
+                        updateCmd.Parameters.AddWithValue("$id", existingId);
+                        updateCmd.ExecuteNonQuery();
+                        return EnqueueResult.Enqueued;
+                    }
+                    return EnqueueResult.AlreadyQueued;
+                }
+            }
 
             using var cmd = _conn.CreateCommand();
             cmd.CommandText = @"
@@ -179,7 +201,8 @@ public sealed class UploadQueue : IDisposable
             select.CommandText = @"
                 SELECT id, source_path, file_hash, file_size, status, attempts, last_error, detected_at
                 FROM queue
-                WHERE status = 'Pending' AND (next_retry_at IS NULL OR next_retry_at <= $now)
+                WHERE (status = 'Pending' OR (status = 'Failed' AND next_retry_at <= $now))
+                  AND (next_retry_at IS NULL OR next_retry_at <= $now)
                 ORDER BY detected_at ASC LIMIT $n;";
             select.Parameters.AddWithValue("$now", now);
             select.Parameters.AddWithValue("$n", maxCount);
@@ -214,7 +237,7 @@ public sealed class UploadQueue : IDisposable
     }
 
     /// <summary>
-    /// How many queue rows are currently due for upload (Pending with expired backoff).
+    /// How many queue rows are currently due for upload (Pending or Failed with expired backoff).
     /// Lets the engine skip the Tailscale hook entirely when there is nothing to do.
     /// </summary>
     public int CountDue()
@@ -222,7 +245,7 @@ public sealed class UploadQueue : IDisposable
         lock (_lock)
         {
             using var cmd = _conn.CreateCommand();
-            cmd.CommandText = "SELECT COUNT(*) FROM queue WHERE status = 'Pending' AND (next_retry_at IS NULL OR next_retry_at <= $now);";
+            cmd.CommandText = "SELECT COUNT(*) FROM queue WHERE (status = 'Pending' OR (status = 'Failed' AND next_retry_at <= $now)) AND (next_retry_at IS NULL OR next_retry_at <= $now);";
             cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
             return Convert.ToInt32(cmd.ExecuteScalar());
         }

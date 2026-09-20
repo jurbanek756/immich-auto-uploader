@@ -9,6 +9,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="ImmichAutoUploader.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Windows DPAPI for encrypted credential storage (Windows-only at runtime) -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
     <!-- Persistent upload queue (hash-tracked, survives restarts) -->
