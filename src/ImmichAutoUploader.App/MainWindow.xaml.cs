@@ -109,9 +109,16 @@ public partial class MainWindow : Window
         ChkUseTailscale.IsChecked = s.UseTailscale;
         TxtTailscaleUrl.Text = s.ImmichUrlViaTailscale;
         TxtGoPath.Text = s.ImmichGoPath;
-        LblGoVersion.Text = string.IsNullOrWhiteSpace(s.ImmichGoVersion)
-            ? "(not found — run build.ps1)"
-            : s.ImmichGoVersion;
+        if (!string.IsNullOrWhiteSpace(s.ImmichGoPath) && File.Exists(s.ImmichGoPath))
+        {
+            LblGoVersion.Text = string.IsNullOrWhiteSpace(s.ImmichGoVersion)
+                ? "(custom binary)"
+                : s.ImmichGoVersion;
+        }
+        else
+        {
+            LblGoVersion.Text = "(not found)";
+        }
         TxtConcurrentTasks.Text = s.ConcurrentTasks.ToString();
         TxtBatchMinutes.Text = s.BatchIntervalMinutes.ToString();
         TxtBatchSize.Text = s.MaxFilesPerBatch.ToString();
@@ -218,6 +225,37 @@ public partial class MainWindow : Window
             return;
         }
 
+        string goPath = TxtGoPath.Text.Trim();
+        string goVersion = App.Settings.ImmichGoVersion;
+        string candidate = Path.Combine(AppContext.BaseDirectory, "tools", "immich-go", "immich-go.exe");
+
+        if (string.IsNullOrWhiteSpace(goPath))
+        {
+            if (File.Exists(candidate))
+            {
+                goPath = candidate;
+                TxtGoPath.Text = candidate;
+                string versionFile = Path.Combine(AppContext.BaseDirectory, "tools", "immich-go", "pinned-version.txt");
+                if (File.Exists(versionFile))
+                    goVersion = File.ReadAllText(versionFile).Trim();
+            }
+        }
+        else if (!File.Exists(goPath))
+        {
+            SetStatus($"immich-go executable not found at '{goPath}'.");
+            return;
+        }
+        else if (string.Equals(Path.GetFullPath(goPath), Path.GetFullPath(candidate), StringComparison.OrdinalIgnoreCase))
+        {
+            string versionFile = Path.Combine(AppContext.BaseDirectory, "tools", "immich-go", "pinned-version.txt");
+            if (File.Exists(versionFile))
+                goVersion = File.ReadAllText(versionFile).Trim();
+        }
+        else
+        {
+            goVersion = "(custom binary)";
+        }
+
         var s = new AppSettings
         {
             ImmichUrl = TxtUrl.Text.Trim().TrimEnd('/'),
@@ -228,8 +266,8 @@ public partial class MainWindow : Window
             UseTailscale = ChkUseTailscale.IsChecked == true,
             ImmichUrlViaTailscale = TxtTailscaleUrl.Text.Trim().TrimEnd('/'),
             TailscalePath = App.Settings.TailscalePath,
-            ImmichGoPath = TxtGoPath.Text.Trim(),
-            ImmichGoVersion = App.Settings.ImmichGoVersion, // managed by build.ps1
+            ImmichGoPath = goPath,
+            ImmichGoVersion = goVersion,
             DeviceUuid = App.Settings.DeviceUuid,
             ConcurrentTasks = concurrent,
             OnErrors = (CmbOnErrors.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content as string ?? "continue",
@@ -266,6 +304,42 @@ public partial class MainWindow : Window
 
     private void BrowseDone_Click(object sender, RoutedEventArgs e)
         => TxtDoneFolder.Text = PickFolder(TxtDoneFolder.Text) ?? TxtDoneFolder.Text;
+
+    private void BrowseGo_Click(object sender, RoutedEventArgs e)
+    {
+        string? picked = PickExecutable(TxtGoPath.Text);
+        if (!string.IsNullOrWhiteSpace(picked))
+        {
+            TxtGoPath.Text = picked;
+            string candidate = Path.Combine(AppContext.BaseDirectory, "tools", "immich-go", "immich-go.exe");
+            if (string.Equals(Path.GetFullPath(picked), Path.GetFullPath(candidate), StringComparison.OrdinalIgnoreCase))
+            {
+                string versionFile = Path.Combine(AppContext.BaseDirectory, "tools", "immich-go", "pinned-version.txt");
+                LblGoVersion.Text = File.Exists(versionFile) ? File.ReadAllText(versionFile).Trim() : "(bundled)";
+            }
+            else
+            {
+                LblGoVersion.Text = "(custom binary)";
+            }
+        }
+    }
+
+    /// <summary>
+    /// Opens an OpenFileDialog to select an executable.
+    /// </summary>
+    private static string? PickExecutable(string current)
+    {
+        var dlg = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Select immich-go executable",
+            Filter = "immich-go (immich-go.exe)|immich-go.exe|Executables (*.exe)|*.exe|All Files (*.*)|*.*",
+            CheckFileExists = true,
+            InitialDirectory = File.Exists(current)
+                ? Path.GetDirectoryName(current) ?? string.Empty
+                : AppContext.BaseDirectory,
+        };
+        return dlg.ShowDialog() == true ? dlg.FileName : null;
+    }
 
     /// <summary>
     /// Opens a Windows Forms folder browser dialog.

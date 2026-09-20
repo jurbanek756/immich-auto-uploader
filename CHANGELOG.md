@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v1.0.6] - 2026-09-20
+
+### Fixed
+- **Release Packaging & Bundled Tool Delivery**:
+  - Configured `ImmichAutoUploader.App.csproj` with `CopyToPublishDirectory="Always"` and `ExcludeFromSingleFile="true"` for bundled tools, ensuring `immich-go.exe` is retained in the publish folder and packaged into both `ImmichAutoUploader-*-Setup.exe` and `.zip` releases.
+  - Added post-publish verification and fallback step in `.github/workflows/release.yml` with binary size validation (> 1MB) to fail-fast if `immich-go.exe` is missing or truncated.
+  - Updated `UploadEngine` warning logging when `immich-go` is missing to provide actionable user guidance rather than developer build instructions.
+  - Enforced UTF-8 encoding in `build.ps1` when writing `pinned-version.txt`.
+
+### Added
+- **UI & Executable Selection**:
+  - Added a "Browse…" button next to the `immich-go` executable path in Settings, allowing users to select an external or custom `immich-go.exe` binary.
+  - Added path validation in `MainWindow.Save_Click` ensuring configured `immich-go` paths exist before saving.
+  - Updated status display to show `(custom binary)` when an external binary is selected.
+
+---
+
 ## [v1.0.5] - 2026-09-20
 
 ### Fixed

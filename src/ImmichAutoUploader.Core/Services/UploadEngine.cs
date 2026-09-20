@@ -161,7 +161,8 @@ public sealed class UploadEngine : IDisposable
         }
         if (string.IsNullOrWhiteSpace(s.ImmichGoPath) || !File.Exists(s.ImmichGoPath))
         {
-            AppLogger.Warn("Upload batch skipped: immich-go not found. Run build.ps1, then rebuild.");
+            string detail = string.IsNullOrWhiteSpace(s.ImmichGoPath) ? "no path configured" : $"'{s.ImmichGoPath}' not found";
+            AppLogger.Warn($"Upload batch skipped: immich-go executable ({detail}). Check settings or reinstall the application.");
             return;
         }
 

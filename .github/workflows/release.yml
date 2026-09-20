@@ -37,6 +37,23 @@ jobs:
           dotnet publish src/ImmichAutoUploader.App/ImmichAutoUploader.App.csproj
           -c Release -r win-x64 --self-contained true -o publish
 
+      - name: Verify bundled tools
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "publish/tools/immich-go/immich-go.exe")) {
+            Write-Warning "immich-go.exe was not copied by dotnet publish; copying manually from tools/immich-go..."
+            New-Item -ItemType Directory -Force -Path "publish/tools/immich-go" | Out-Null
+            Copy-Item -Path "tools/immich-go/*" -Destination "publish/tools/immich-go" -Recurse -Force
+          }
+          if (-not (Test-Path "publish/tools/immich-go/immich-go.exe")) {
+            throw "CRITICAL: publish/tools/immich-go/immich-go.exe is missing after publish!"
+          }
+          $exeSize = (Get-Item "publish/tools/immich-go/immich-go.exe").Length
+          if ($exeSize -lt 1000000) {
+            throw "CRITICAL: publish/tools/immich-go/immich-go.exe is too small ($exeSize bytes)!"
+          }
+          Write-Host "Verified bundled immich-go.exe ($exeSize bytes)" -ForegroundColor Green
+
       - name: Package zip
         shell: pwsh
         run: |

@@ -79,9 +79,13 @@
                         <DockPanel Margin="0,0,0,8">
                             <Label Content="Bundled immich-go:" Padding="0,0,0,2" VerticalAlignment="Center"/>
                             <TextBlock x:Name="LblGoVersion" Margin="8,0,0,0" VerticalAlignment="Center"
-                                       FontWeight="SemiBold" Text="(not found — run build.ps1)"/>
+                                       FontWeight="SemiBold" Text="(not found)"/>
                         </DockPanel>
-                        <TextBox x:Name="TxtGoPath" IsReadOnly="True" Opacity="0.7" Margin="0,0,0,8"/>
+                        <DockPanel Margin="0,0,0,8">
+                            <Button Content="Browse…" DockPanel.Dock="Right" Width="80" Margin="8,0,0,0"
+                                    Click="BrowseGo_Click"/>
+                            <TextBox x:Name="TxtGoPath"/>
+                        </DockPanel>
 
                         <Grid Margin="0,0,0,8">
                             <Grid.ColumnDefinitions>

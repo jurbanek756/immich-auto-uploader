@@ -57,7 +57,7 @@ if ($exe.FullName -ne $finalExe) {
     Move-Item -LiteralPath $exe.FullName -Destination $finalExe -Force
 }
 
-$version | Out-File -FilePath (Join-Path $toolsDir "pinned-version.txt") -NoNewline
+$version | Out-File -FilePath (Join-Path $toolsDir "pinned-version.txt") -Encoding utf8 -NoNewline
 
 Write-Host ""
 Write-Host "Pinned immich-go $version" -ForegroundColor Green
