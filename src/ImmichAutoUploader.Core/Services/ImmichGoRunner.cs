@@ -58,6 +58,10 @@ public static class ImmichGoRunner
         {
             r = await ProcessHelper.RunAsync(req.ExePath, args, PerFileTimeoutMs, ct).ConfigureAwait(false);
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             return new UploadResult(false, -1, $"could not start immich-go: {ex.Message}");

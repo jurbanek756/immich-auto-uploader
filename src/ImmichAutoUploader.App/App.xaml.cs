@@ -58,7 +58,11 @@ public partial class App : System.Windows.Application
                 CredentialStore.Load(CredentialNames.JellyfinApiKey)));
         _tray = new TrayIconManager(
             onOpen: () => Dispatcher.Invoke(ShowSettings),
-            onExit: () => Dispatcher.Invoke(() => Shutdown()),
+            onExit: () => Dispatcher.Invoke(() =>
+            {
+                if (MainWindow is MainWindow w) w.IsExplicitExit = true;
+                Shutdown();
+            }),
             onUploadNow: () => { var e = Engine; if (e is not null) _ = e.TriggerNowAsync(); });
         Engine.NotifyUser = msg => _tray?.Notify(msg, System.Windows.Forms.ToolTipIcon.Warning);
         Engine.Start();
@@ -74,6 +78,8 @@ public partial class App : System.Windows.Application
         // Reuse the single settings window; closing it hides to tray instead of exiting.
         if (MainWindow is MainWindow w)
         {
+            if (w.WindowState == WindowState.Minimized)
+                w.WindowState = WindowState.Normal;
             w.Show();
             w.Activate();
             return;
@@ -128,13 +134,24 @@ public partial class App : System.Windows.Application
         }
     }
 
+    protected override void OnSessionEnding(SessionEndingCancelEventArgs e)
+    {
+        if (MainWindow is MainWindow w) w.IsExplicitExit = true;
+        base.OnSessionEnding(e);
+    }
+
     protected override void OnExit(ExitEventArgs e)
     {
         Engine?.Dispose();
         _fileWatcher?.Dispose();
         Queue?.Dispose();
         _tray?.Dispose();
-        _singleInstance?.Dispose();
+        if (_singleInstance is not null)
+        {
+            try { _singleInstance.ReleaseMutex(); }
+            catch { /* not owned or already released */ }
+            _singleInstance.Dispose();
+        }
         base.OnExit(e);
     }
 }

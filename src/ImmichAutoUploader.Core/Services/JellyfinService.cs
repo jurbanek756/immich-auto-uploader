@@ -13,25 +13,29 @@ namespace ImmichAutoUploader.Core.Services;
 /// </summary>
 public static class JellyfinService
 {
+    private static readonly HttpClient SharedClient = new(new SocketsHttpHandler
+    {
+        PooledConnectionLifetime = TimeSpan.FromMinutes(15)
+    }) { Timeout = TimeSpan.FromSeconds(30) };
+
     public static async Task TriggerRefreshAsync(
         string baseUrl, string apiKey, string libraryName, CancellationToken ct = default)
     {
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-            http.DefaultRequestHeaders.Add("Authorization", $"MediaBrowser Token=\"{apiKey}\"");
             string base_ = baseUrl.TrimEnd('/');
 
             if (!string.IsNullOrWhiteSpace(libraryName))
             {
-                string? libraryId = await FindLibraryIdAsync(http, base_, libraryName, ct).ConfigureAwait(false);
+                string? libraryId = await FindLibraryIdAsync(SharedClient, base_, apiKey, libraryName, ct).ConfigureAwait(false);
                 if (libraryId is null)
                 {
                     AppLogger.Warn($"Jellyfin: library '{libraryName}' not found; skipping refresh.");
                     return;
                 }
-                using var resp = await http.PostAsync(
-                    $"{base_}/Items/{libraryId}/Refresh?Recursive=true", null, ct).ConfigureAwait(false);
+                using var req = new HttpRequestMessage(HttpMethod.Post, $"{base_}/Items/{libraryId}/Refresh?Recursive=true");
+                req.Headers.Add("Authorization", $"MediaBrowser Token=\"{apiKey}\"");
+                using var resp = await SharedClient.SendAsync(req, ct).ConfigureAwait(false);
                 if (resp.IsSuccessStatusCode)
                     AppLogger.Info($"Jellyfin: refresh triggered for library '{libraryName}'.");
                 else
@@ -39,7 +43,9 @@ public static class JellyfinService
             }
             else
             {
-                using var resp = await http.PostAsync($"{base_}/Library/Refresh", null, ct).ConfigureAwait(false);
+                using var req = new HttpRequestMessage(HttpMethod.Post, $"{base_}/Library/Refresh");
+                req.Headers.Add("Authorization", $"MediaBrowser Token=\"{apiKey}\"");
+                using var resp = await SharedClient.SendAsync(req, ct).ConfigureAwait(false);
                 if (resp.IsSuccessStatusCode)
                     AppLogger.Info("Jellyfin: full library refresh triggered.");
                 else
@@ -53,9 +59,11 @@ public static class JellyfinService
     }
 
     private static async Task<string?> FindLibraryIdAsync(
-        HttpClient http, string baseUrl, string libraryName, CancellationToken ct)
+        HttpClient http, string baseUrl, string apiKey, string libraryName, CancellationToken ct)
     {
-        using var resp = await http.GetAsync($"{baseUrl}/Library/MediaFolders", ct).ConfigureAwait(false);
+        using var req = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/Library/MediaFolders");
+        req.Headers.Add("Authorization", $"MediaBrowser Token=\"{apiKey}\"");
+        using var resp = await http.SendAsync(req, ct).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
         {
             AppLogger.Warn($"Jellyfin: could not list libraries (HTTP {(int)resp.StatusCode}).");

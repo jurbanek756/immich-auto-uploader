@@ -57,15 +57,12 @@ public sealed class UploadQueue : IDisposable
                     updated_at  TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_queue_status ON queue(status);
-                CREATE INDEX IF NOT EXISTS idx_queue_hash ON queue(file_hash);
                 CREATE TABLE IF NOT EXISTS uploaded (
                     file_hash       TEXT PRIMARY KEY,
                     source_path     TEXT NOT NULL,
                     uploaded_at     TEXT NOT NULL,
                     immich_asset_id TEXT
                 );
-                -- Ensure no existing duplicates before adding unique index
-                DELETE FROM queue WHERE id NOT IN (SELECT MIN(id) FROM queue GROUP BY file_hash);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_hash_unique ON queue(file_hash);";
             cmd.ExecuteNonQuery();
         }
@@ -163,7 +160,7 @@ public sealed class UploadQueue : IDisposable
     {
         using var sha = SHA256.Create();
         await using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
-            FileShare.Read, bufferSize: 81920, useAsync: true);
+            FileShare.ReadWrite, bufferSize: 81920, useAsync: true);
         byte[] hash = await sha.ComputeHashAsync(fs, ct).ConfigureAwait(false);
         return Convert.ToHexString(hash);
     }

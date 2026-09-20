@@ -197,8 +197,8 @@ public sealed class UploadEngine : IDisposable
                     if (stopRequested || ct.IsCancellationRequested)
                         return;
 
-                    processedIds.Add(file.Id);
                     var outcome = await ProcessFileAsync(file, s, creds, serverUrl, ct).ConfigureAwait(false);
+                    processedIds.Add(file.Id);
                     switch (outcome)
                     {
                         case ProcessOutcome.Uploaded:
@@ -300,6 +300,11 @@ public sealed class UploadEngine : IDisposable
         {
             result = await ImmichGoRunner.UploadSingleAsync(req, ct).ConfigureAwait(false);
         }
+        catch (OperationCanceledException)
+        {
+            _queue.RevertToPending(new[] { file.Id });
+            throw;
+        }
         catch (Exception ex)
         {
             _queue.MarkFailed(file.Id, $"Runner error: {ex.Message}");
@@ -316,30 +321,32 @@ public sealed class UploadEngine : IDisposable
         }
 
         _queue.MarkUploaded(file.Id);
-        MoveToDone(file.SourcePath, s);
+        await MoveToDoneAsync(file.SourcePath, s, ct).ConfigureAwait(false);
         AppLogger.Info($"Uploaded: {file.SourcePath}");
         return ProcessOutcome.Uploaded;
     }
 
-    private static string RedactSecrets(string text, EngineCredentials creds)
+    public static string RedactSecrets(string text, EngineCredentials creds)
     {
         if (string.IsNullOrEmpty(text)) return text;
         if (!string.IsNullOrEmpty(creds.ImmichApiKey))
             text = text.Replace(creds.ImmichApiKey, "[REDACTED]");
         if (!string.IsNullOrEmpty(creds.ImmichAdminApiKey))
             text = text.Replace(creds.ImmichAdminApiKey, "[REDACTED]");
+        if (!string.IsNullOrEmpty(creds.JellyfinApiKey))
+            text = text.Replace(creds.JellyfinApiKey, "[REDACTED]");
         return text;
     }
 
-    private static void MoveToDone(string sourcePath, AppSettings s)
+    public static async Task MoveToDoneAsync(string sourcePath, AppSettings s, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(s.DoneFolder))
             return;
         try
         {
             string relative = Path.GetRelativePath(s.WatchFolder, sourcePath);
-            if (relative.StartsWith("..", StringComparison.Ordinal))
-                relative = Path.GetFileName(sourcePath); // not under the watch folder; flat move
+            if (Path.IsPathRooted(relative) || relative.StartsWith("..", StringComparison.Ordinal))
+                relative = Path.GetFileName(sourcePath); // cross-volume or outside watch folder; flat move
             string dest = Path.Combine(s.DoneFolder, relative);
             string? dir = Path.GetDirectoryName(dest);
             if (!string.IsNullOrEmpty(dir))
@@ -356,11 +363,11 @@ public sealed class UploadEngine : IDisposable
                 }
                 catch (IOException) when (attempt < 4)
                 {
-                    Thread.Sleep(50);
+                    await Task.Delay(50, ct).ConfigureAwait(false);
                 }
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // Upload already succeeded — the file stays put and will be skipped as
             // already-uploaded on the next scan. Never lose a photo over a move error.

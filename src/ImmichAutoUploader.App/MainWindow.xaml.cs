@@ -22,11 +22,17 @@ public partial class MainWindow : Window
         _ = RefreshQueueStatusAsync();
     }
 
+    public bool IsExplicitExit { get; set; }
+
     // Closing the window hides to tray; the app keeps running. Use tray -> Exit to quit.
     protected override void OnClosing(CancelEventArgs e)
     {
-        e.Cancel = true;
-        Hide();
+        if (!IsExplicitExit)
+        {
+            e.Cancel = true;
+            Hide();
+            return;
+        }
         base.OnClosing(e);
     }
 
@@ -98,11 +104,17 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!string.IsNullOrWhiteSpace(TxtUrl.Text) &&
-            (!Uri.TryCreate(TxtUrl.Text.Trim(), UriKind.Absolute, out var immichUri) ||
-             (immichUri.Scheme != Uri.UriSchemeHttp && immichUri.Scheme != Uri.UriSchemeHttps)))
+        if (string.IsNullOrWhiteSpace(TxtUrl.Text) ||
+            !Uri.TryCreate(TxtUrl.Text.Trim(), UriKind.Absolute, out var immichUri) ||
+            (immichUri.Scheme != Uri.UriSchemeHttp && immichUri.Scheme != Uri.UriSchemeHttps))
         {
             SetStatus("Immich server URL must be a valid http:// or https:// URL.");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(TxtApiKey.Password))
+        {
+            SetStatus("Immich API key is required.");
             return;
         }
 

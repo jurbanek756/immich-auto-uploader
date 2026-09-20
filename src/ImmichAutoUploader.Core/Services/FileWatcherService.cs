@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Threading.Channels;
 
 namespace ImmichAutoUploader.Core.Services;
 
@@ -43,7 +44,13 @@ public sealed class FileWatcherService : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _settleTask;
     private readonly TimeSpan _settleDelay = TimeSpan.FromSeconds(5);
-    private readonly SemaphoreSlim _hashGate = new(4, 4);
+    private readonly Channel<string> _enqueueChannel = Channel.CreateBounded<string>(new BoundedChannelOptions(2000)
+    {
+        FullMode = BoundedChannelFullMode.Wait,
+        SingleReader = false,
+        SingleWriter = true,
+    });
+    private readonly List<Task> _workerTasks = new();
     private bool _disposed;
 
     public FileWatcherService(string watchFolder, string doneFolder, UploadQueue queue)
@@ -77,6 +84,10 @@ public sealed class FileWatcherService : IDisposable
     public void Start()
     {
         _watcher.EnableRaisingEvents = true;
+        for (int i = 0; i < 4; i++)
+        {
+            _workerTasks.Add(Task.Run(() => EnqueueWorkerLoopAsync(_cts.Token)));
+        }
         AppLogger.Info($"Watching folder: {_watchFolder}");
         Task.Run(() => InitialScanAsync(_cts.Token));
     }
@@ -172,32 +183,48 @@ public sealed class FileWatcherService : IDisposable
                 continue;
             }
 
-            _pending.TryRemove(path, out _);
-            _ = Task.Run(() => EnqueueAndLogAsync(path)); // hashing can be slow; throttled by _hashGate
+            if (!IsFileAvailable(path))
+            {
+                _pending[path] = (now, size); // Writer still has the file open; wait more
+                continue;
+            }
+
+            // Write to the bounded channel. Keep in _pending with sentinel timestamp until enqueued.
+            if (_enqueueChannel.Writer.TryWrite(path))
+            {
+                _pending[path] = (DateTime.MaxValue, size);
+            }
         }
     }
 
-    private async Task EnqueueAndLogAsync(string path)
+    private static bool IsFileAvailable(string path)
     {
-        await _hashGate.WaitAsync(_cts.Token).ConfigureAwait(false);
         try
         {
-            var result = await _queue.TryEnqueueAsync(path, _cts.Token).ConfigureAwait(false);
-            switch (result)
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task EnqueueWorkerLoopAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (await _enqueueChannel.Reader.WaitToReadAsync(ct).ConfigureAwait(false))
             {
-                case Models.EnqueueResult.Enqueued:
-                    AppLogger.Info($"Queued for upload: {path}");
-                    break;
-                case Models.EnqueueResult.SkippedEmptyFile:
-                    AppLogger.Warn($"Skipped (empty file, Immich would reject it): {path}");
-                    break;
-                case Models.EnqueueResult.AlreadyUploaded:
-                    AppLogger.Info($"Skipped (already uploaded before): {path}");
-                    break;
-                case Models.EnqueueResult.AlreadyQueued:
-                    AppLogger.Info($"Skipped (already queued): {path}");
-                    break;
-                // Temp / non-media / missing files are not worth log spam.
+                while (_enqueueChannel.Reader.TryRead(out var path))
+                {
+                    if (ct.IsCancellationRequested) return;
+                    await EnqueueAndLogAsync(path, ct).ConfigureAwait(false);
+                }
             }
         }
         catch (OperationCanceledException)
@@ -206,11 +233,55 @@ public sealed class FileWatcherService : IDisposable
         }
         catch (Exception ex)
         {
-            AppLogger.Error($"Failed to queue {path}.", ex);
+            AppLogger.Error("Enqueue worker crashed.", ex);
         }
-        finally
+    }
+
+    private async Task EnqueueAndLogAsync(string path, CancellationToken ct)
+    {
+        try
         {
-            _hashGate.Release();
+            var result = await _queue.TryEnqueueAsync(path, ct).ConfigureAwait(false);
+            switch (result)
+            {
+                case Models.EnqueueResult.Enqueued:
+                    AppLogger.Info($"Queued for upload: {path}");
+                    _pending.TryRemove(path, out _);
+                    break;
+                case Models.EnqueueResult.SkippedEmptyFile:
+                    AppLogger.Warn($"Skipped (empty file, Immich would reject it): {path}");
+                    _pending.TryRemove(path, out _);
+                    break;
+                case Models.EnqueueResult.AlreadyUploaded:
+                    AppLogger.Info($"Skipped (already uploaded before): {path}");
+                    _pending.TryRemove(path, out _);
+                    break;
+                case Models.EnqueueResult.AlreadyQueued:
+                    AppLogger.Info($"Skipped (already queued): {path}");
+                    _pending.TryRemove(path, out _);
+                    break;
+                case Models.EnqueueResult.SkippedNotMedia:
+                case Models.EnqueueResult.SkippedTempFile:
+                case Models.EnqueueResult.FileNotFound:
+                    _pending.TryRemove(path, out _);
+                    break;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // shutting down: reset timestamp so it can be retried on next startup
+            _pending[path] = (DateTime.UtcNow, GetSizeSafe(path));
+        }
+        catch (IOException ex)
+        {
+            // Transient lock or sharing violation: reset timestamp so it retries on next settle check
+            AppLogger.Warn($"Transient I/O error queueing {path}, will retry: {ex.Message}");
+            _pending[path] = (DateTime.UtcNow, GetSizeSafe(path));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error($"Failed to queue {path}.", ex);
+            _pending.TryRemove(path, out _);
         }
     }
 
@@ -259,8 +330,9 @@ public sealed class FileWatcherService : IDisposable
     {
         if (string.IsNullOrEmpty(_doneFolder))
             return false;
+        string normalizedDone = Path.TrimEndingDirectorySeparator(_doneFolder) + Path.DirectorySeparatorChar;
         string full = Path.GetFullPath(path);
-        return full.StartsWith(_doneFolder + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        return full.StartsWith(normalizedDone, StringComparison.OrdinalIgnoreCase);
     }
 
     private static long GetSizeSafe(string path)
@@ -280,10 +352,12 @@ public sealed class FileWatcherService : IDisposable
         if (_disposed) return;
         _disposed = true;
         _cts.Cancel();
-        try { _settleTask.Wait(TimeSpan.FromSeconds(5)); }
+        _enqueueChannel.Writer.TryComplete();
+        try { _settleTask.Wait(TimeSpan.FromSeconds(3)); }
+        catch { /* best effort */ }
+        try { Task.WaitAll(_workerTasks.ToArray(), TimeSpan.FromSeconds(5)); }
         catch { /* best effort */ }
         _watcher.Dispose();
-        _hashGate.Dispose();
         _cts.Dispose();
         AppLogger.Info("File watcher stopped.");
     }
