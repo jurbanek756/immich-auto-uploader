@@ -213,19 +213,25 @@ public partial class App : System.Windows.Application
 
     /// <summary>
     /// If the user hasn't picked an immich-go binary, default to the one bundled
-    /// next to the app by build.ps1 (tools\immich-go\immich-go.exe).
+    /// next to the app (tools\immich-go\immich-go.exe).
     /// </summary>
     private static void ResolveImmichGoPath()
     {
-        if (!string.IsNullOrWhiteSpace(Settings.ImmichGoPath) && File.Exists(Settings.ImmichGoPath))
-            return;
-
         string candidate = Path.Combine(AppContext.BaseDirectory, "tools", "immich-go", "immich-go.exe");
-        if (File.Exists(candidate))
-        {
-            Settings.ImmichGoPath = candidate;
+        string versionFile = Path.Combine(AppContext.BaseDirectory, "tools", "immich-go", "pinned-version.txt");
 
-            string versionFile = Path.Combine(AppContext.BaseDirectory, "tools", "immich-go", "pinned-version.txt");
+        if (string.IsNullOrWhiteSpace(Settings.ImmichGoPath) || !File.Exists(Settings.ImmichGoPath))
+        {
+            if (File.Exists(candidate))
+            {
+                Settings.ImmichGoPath = candidate;
+                if (File.Exists(versionFile))
+                    Settings.ImmichGoVersion = File.ReadAllText(versionFile).Trim();
+            }
+        }
+        else if (string.IsNullOrWhiteSpace(Settings.ImmichGoVersion) &&
+                 string.Equals(Path.GetFullPath(Settings.ImmichGoPath), Path.GetFullPath(candidate), StringComparison.OrdinalIgnoreCase))
+        {
             if (File.Exists(versionFile))
                 Settings.ImmichGoVersion = File.ReadAllText(versionFile).Trim();
         }

@@ -21,7 +21,10 @@
 
   <!-- Bundle the pinned immich-go (fetched by build.ps1) alongside the app -->
   <ItemGroup>
-    <Content Include="..\..\tools\immich-go\**" CopyToOutputDirectory="PreserveNewest"
+    <Content Include="..\..\tools\immich-go\**"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="Always"
+             ExcludeFromSingleFile="true"
              Link="tools\immich-go\%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 
