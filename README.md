@@ -18,12 +18,15 @@ to Immich using a bundled, version-pinned `immich-go`.
    (`POST /Library/Refresh`). Uses the `Authorization: MediaBrowser Token="…"` header,
    which is what this Jellyfin instance requires. Only fires when a batch actually
    uploaded at least one file.
-5. **Optional Tailscale hook** — when enabled, the app runs `tailscale up` before each
-   upload batch (and waits for it to connect) so uploads work away from home. An
-   optional Tailscale-specific server URL (e.g. `http://100.x.y.z:2283`) is used for
-   immich-go while Tailscale is active; otherwise the primary URL is used. The app
-   never runs `tailscale down` — your VPN state is left alone. If the device isn't
-   logged into Tailscale, the login URL is surfaced to you instead of hanging.
+5. **Optional Tailscale hook** — when enabled and the queue has work, the app runs
+   `tailscale up` before each upload batch (and waits for it to connect) so uploads
+   work away from home. An optional Tailscale-specific server URL
+   (e.g. `http://100.x.y.z:2283`) is used for immich-go while Tailscale is active;
+   otherwise the primary URL is used. After the batch — including the Jellyfin
+   refresh — the app runs `tailscale down` again, but only if it was the one that
+   brought Tailscale up; a connection you established yourself is left alone. If
+   the device isn't logged into Tailscale, the login URL is surfaced to you instead
+   of hanging.
 
 ## Project layout
 
@@ -104,10 +107,11 @@ dotnet publish src\ImmichAutoUploader.App -c Release -r win-x64 --self-contained
     capped at 240 min) via a `next_retry_at` column (auto-migrated on older
     DBs). Files that vanished are dropped silently. "Upload now" button + tray
     menu item run a batch on demand (no-op if one is already running).
-  - `TailscaleService`: if enabled, `tailscale status --json` → `tailscale up`
-    if needed; surfaces the login URL if the device isn't authenticated; picks
-    the alternate Immich URL when set. The app only ever brings Tailscale *up* —
-    it never disconnects it.
+  - `TailscaleService`: if enabled and the queue has due work,
+    `tailscale status --json` → `tailscale up` if needed; surfaces the login URL
+    if the device isn't authenticated; picks the alternate Immich URL when set.
+    After the batch (Jellyfin refresh included) it runs `tailscale down` again —
+    but only when this batch was the one that connected it.
   - `JellyfinService`: after a batch with ≥1 upload, resolves the exact library
     name via `/Library/MediaFolders` and calls
     `POST /Items/{id}/Refresh?Recursive=true` (blank name → full

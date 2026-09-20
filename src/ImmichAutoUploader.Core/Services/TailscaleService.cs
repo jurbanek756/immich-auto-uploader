@@ -6,10 +6,13 @@ namespace ImmichAutoUploader.Core.Services;
 
 /// <summary>
 /// Ensures Tailscale is connected before an upload batch, so the app can
-/// reach the Immich server from outside the home LAN.
+/// reach the Immich server from outside the home LAN, and disconnects it
+/// again once the batch (including the Jellyfin refresh) is done.
 /// <para/>
-/// Deliberate limits: the app only ever brings Tailscale <i>up</i> — it never
-/// runs <c>tailscale down</c> or changes the user's VPN configuration.
+/// Deliberate limit: the app only ever tears down a connection it established
+/// itself (see <see cref="EnsureOutcome.ConnectedByUs"/>). If Tailscale was
+/// already up — e.g. the user connected it manually — the app leaves it alone.
+/// It never logs the device out or changes other VPN configuration.
 /// </summary>
 public static class TailscaleService
 {
@@ -21,7 +24,11 @@ public static class TailscaleService
         Failed,
     }
 
-    public sealed record EnsureOutcome(EnsureResult Result, string? Detail);
+    /// <summary>
+    /// <c>ConnectedByUs</c> is true only when this call ran <c>tailscale up</c>
+    /// itself — the caller should run <c>tailscale down</c> afterwards.
+    /// </summary>
+    public sealed record EnsureOutcome(EnsureResult Result, string? Detail, bool ConnectedByUs);
 
     /// <summary>
     /// Locate tailscale.exe: explicit setting, then the default install
@@ -56,11 +63,11 @@ public static class TailscaleService
     public static async Task<EnsureOutcome> EnsureConnectedAsync(string exePath, CancellationToken ct = default)
     {
         if (!File.Exists(exePath))
-            return new EnsureOutcome(EnsureResult.NotInstalled, exePath);
+            return new EnsureOutcome(EnsureResult.NotInstalled, exePath, false);
 
         string? state = await GetBackendStateAsync(exePath, ct).ConfigureAwait(false);
         if (state == "Running")
-            return new EnsureOutcome(EnsureResult.Connected, null);
+            return new EnsureOutcome(EnsureResult.Connected, null, false);
 
         AppLogger.Info("Tailscale not connected; running 'tailscale up'.");
 
@@ -71,22 +78,46 @@ public static class TailscaleService
         }
         catch (Exception ex)
         {
-            return new EnsureOutcome(EnsureResult.Failed, ex.Message);
+            return new EnsureOutcome(EnsureResult.Failed, ex.Message, false);
         }
 
         string combined = up.StdOut + "\n" + up.StdErr;
         string? loginUrl = ExtractLoginUrl(combined);
         if (loginUrl is not null)
-            return new EnsureOutcome(EnsureResult.AuthRequired, loginUrl);
+            return new EnsureOutcome(EnsureResult.AuthRequired, loginUrl, false);
 
         state = await GetBackendStateAsync(exePath, ct).ConfigureAwait(false);
         if (state == "Running")
-            return new EnsureOutcome(EnsureResult.Connected, null);
+            return new EnsureOutcome(EnsureResult.Connected, null, true);
 
         string detail = ProcessHelper.Tail(combined, 5);
         if (string.IsNullOrWhiteSpace(detail))
             detail = $"tailscale is not connected (state: {state ?? "unknown"})";
-        return new EnsureOutcome(EnsureResult.Failed, detail);
+        return new EnsureOutcome(EnsureResult.Failed, detail, false);
+    }
+
+    /// <summary>
+    /// Bring Tailscale back down after a batch. Only call this when the app
+    /// itself ran <c>tailscale up</c> (see <see cref="EnsureOutcome.ConnectedByUs"/>) —
+    /// never tear down a connection the user established themselves.
+    /// Failures are logged, never thrown.
+    /// </summary>
+    public static async Task DisconnectAsync(string exePath, CancellationToken ct = default)
+    {
+        try
+        {
+            AppLogger.Info("Running 'tailscale down' (this batch connected it).");
+            var r = await ProcessHelper.RunAsync(exePath, new[] { "down" }, 30_000, ct).ConfigureAwait(false);
+            string? state = await GetBackendStateAsync(exePath, ct).ConfigureAwait(false);
+            if (r.ExitCode == 0 && !string.Equals(state, "Running", StringComparison.OrdinalIgnoreCase))
+                AppLogger.Info("Tailscale disconnected.");
+            else
+                AppLogger.Warn($"'tailscale down' may not have completed (exit {r.ExitCode}, state: {state ?? "unknown"}).");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"Could not disconnect Tailscale: {ex.Message}");
+        }
     }
 
     private static async Task<string?> GetBackendStateAsync(string exePath, CancellationToken ct)

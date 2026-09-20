@@ -35,7 +35,8 @@ public sealed class AppSettings
     // ---- Tailscale (optional) ----
     /// <summary>
     /// When true, the app ensures Tailscale is connected before each upload batch
-    /// (runs "tailscale up" if needed). The app never disconnects Tailscale.
+    /// (runs "tailscale up" if needed) and disconnects it afterwards ("tailscale down"),
+    /// but only when the app itself established the connection.
     /// </summary>
     public bool UseTailscale { get; set; } = false;
 

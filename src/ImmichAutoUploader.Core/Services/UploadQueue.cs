@@ -206,6 +206,21 @@ public sealed class UploadQueue : IDisposable
         }
     }
 
+    /// <summary>
+    /// How many queue rows are currently due for upload (Pending with expired backoff).
+    /// Lets the engine skip the Tailscale hook entirely when there is nothing to do.
+    /// </summary>
+    public int CountDue()
+    {
+        lock (_lock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM queue WHERE status = 'Pending' AND (next_retry_at IS NULL OR next_retry_at <= $now);";
+            cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
+            return Convert.ToInt32(cmd.ExecuteScalar());
+        }
+    }
+
     public void MarkUploaded(long id, string? immichAssetId = null)
     {
         lock (_lock)

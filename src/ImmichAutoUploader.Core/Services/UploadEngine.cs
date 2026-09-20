@@ -10,7 +10,9 @@ namespace ImmichAutoUploader.Core.Services;
 /// <para/>
 /// Batch flow:
 /// <list type="number">
-///   <item>Tailscale: if enabled, ensure it's connected first (never disconnects it).</item>
+///   <item>Tailscale: if enabled and the queue has due work, ensure it's connected
+///   first — then disconnect it again after the batch (Jellyfin refresh included),
+///   but only if this batch was the one that brought it up.</item>
 ///   <item>Dequeue files whose retry backoff has expired.</item>
 ///   <item>Upload each file (up to <see cref="AppSettings.ConcurrentTasks"/> at once).</item>
 ///   <item>Success → mark uploaded, move the original to the Done folder
@@ -124,20 +126,30 @@ public sealed class UploadEngine : IDisposable
             return;
         }
 
-        // 1. Tailscale hook
+        // 1. Tailscale hook — only when there is actually something to upload.
+        //    The connection is torn down again in the finally below, but only
+        //    if this batch was the one that brought it up.
         string serverUrl = s.ImmichUrl;
+        string? tailscaleExe = null;
+        bool tailscaleConnectedByUs = false;
         if (s.UseTailscale)
         {
-            string? tsExe = await TailscaleService.ResolveExePathAsync(s, ct).ConfigureAwait(false);
-            if (tsExe is null)
+            if (_queue.CountDue() == 0)
+            {
+                AppLogger.Info("Upload batch skipped: queue is empty; leaving Tailscale untouched.");
+                return;
+            }
+            tailscaleExe = await TailscaleService.ResolveExePathAsync(s, ct).ConfigureAwait(false);
+            if (tailscaleExe is null)
             {
                 AppLogger.Warn("Upload batch skipped: Tailscale is enabled but tailscale.exe was not found.");
                 return;
             }
-            var outcome = await TailscaleService.EnsureConnectedAsync(tsExe, ct).ConfigureAwait(false);
+            var outcome = await TailscaleService.EnsureConnectedAsync(tailscaleExe, ct).ConfigureAwait(false);
             switch (outcome.Result)
             {
                 case TailscaleService.EnsureResult.Connected:
+                    tailscaleConnectedByUs = outcome.ConnectedByUs;
                     break;
                 case TailscaleService.EnsureResult.AuthRequired:
                     AppLogger.Warn("Upload batch skipped: Tailscale needs login.");
@@ -154,67 +166,77 @@ public sealed class UploadEngine : IDisposable
         if (s.PauseImmichJobs && string.IsNullOrEmpty(creds.ImmichAdminApiKey))
             AppLogger.Warn("PauseImmichJobs is on but no admin API key is set; server jobs will not be paused.");
 
-        // 2. Dequeue
-        var batch = _queue.DequeueBatch(Math.Max(1, s.MaxFilesPerBatch));
-        if (batch.Count == 0)
-            return;
-
-        // 3. Upload
-        AppLogger.Info($"Upload batch started: {batch.Count} file(s) → {serverUrl}.");
-        int uploaded = 0, failed = 0;
-        var sw = Stopwatch.StartNew();
-        int parallelism = Math.Clamp(s.ConcurrentTasks, 1, 20);
-        using var gate = new SemaphoreSlim(parallelism, parallelism);
-        bool stopRequested = false;
-
-        var tasks = batch.Select(async file =>
-        {
-            await gate.WaitAsync(ct).ConfigureAwait(false);
-            try
-            {
-                if (stopRequested || ct.IsCancellationRequested)
-                    return;
-                bool ok = await ProcessFileAsync(file, s, creds, serverUrl, ct).ConfigureAwait(false);
-                if (ok)
-                    Interlocked.Increment(ref uploaded);
-                else
-                {
-                    Interlocked.Increment(ref failed);
-                    if (string.Equals(s.OnErrors, "stop", StringComparison.OrdinalIgnoreCase))
-                        stopRequested = true;
-                }
-            }
-            finally
-            {
-                gate.Release();
-            }
-        });
         try
         {
-            await Task.WhenAll(tasks).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // shutting down mid-batch; queued rows stay consistent
-        }
-        sw.Stop();
+            // 2. Dequeue
+            var batch = _queue.DequeueBatch(Math.Max(1, s.MaxFilesPerBatch));
+            if (batch.Count == 0)
+                return;
 
-        AppLogger.Info($"Upload batch complete: {uploaded} uploaded, {failed} failed ({sw.Elapsed:mm\\:ss}).");
-        if (failed > 0)
-            NotifyUser?.Invoke($"Upload batch finished: {uploaded} uploaded, {failed} failed. Check the log for details.");
+            // 3. Upload
+            AppLogger.Info($"Upload batch started: {batch.Count} file(s) → {serverUrl}.");
+            int uploaded = 0, failed = 0;
+            var sw = Stopwatch.StartNew();
+            int parallelism = Math.Clamp(s.ConcurrentTasks, 1, 20);
+            using var gate = new SemaphoreSlim(parallelism, parallelism);
+            bool stopRequested = false;
 
-        // 4. Jellyfin hook — only when something actually landed on the server.
-        if (uploaded > 0 && !string.IsNullOrWhiteSpace(s.JellyfinUrl))
+            var tasks = batch.Select(async file =>
+            {
+                await gate.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    if (stopRequested || ct.IsCancellationRequested)
+                        return;
+                    bool ok = await ProcessFileAsync(file, s, creds, serverUrl, ct).ConfigureAwait(false);
+                    if (ok)
+                        Interlocked.Increment(ref uploaded);
+                    else
+                    {
+                        Interlocked.Increment(ref failed);
+                        if (string.Equals(s.OnErrors, "stop", StringComparison.OrdinalIgnoreCase))
+                            stopRequested = true;
+                    }
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            });
+            try
+            {
+                await Task.WhenAll(tasks).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // shutting down mid-batch; queued rows stay consistent
+            }
+            sw.Stop();
+
+            AppLogger.Info($"Upload batch complete: {uploaded} uploaded, {failed} failed ({sw.Elapsed:mm\\:ss}).");
+            if (failed > 0)
+                NotifyUser?.Invoke($"Upload batch finished: {uploaded} uploaded, {failed} failed. Check the log for details.");
+
+            // 4. Jellyfin hook — only when something actually landed on the server.
+            if (uploaded > 0 && !string.IsNullOrWhiteSpace(s.JellyfinUrl))
+            {
+                if (string.IsNullOrWhiteSpace(creds.JellyfinApiKey))
+                {
+                    AppLogger.Warn("Jellyfin URL is set but no API key is stored; skipping refresh.");
+                }
+                else
+                {
+                    await JellyfinService.TriggerRefreshAsync(
+                        s.JellyfinUrl, creds.JellyfinApiKey, s.JellyfinLibraryName, ct).ConfigureAwait(false);
+                }
+            }
+        }
+        finally
         {
-            if (string.IsNullOrWhiteSpace(creds.JellyfinApiKey))
-            {
-                AppLogger.Warn("Jellyfin URL is set but no API key is stored; skipping refresh.");
-            }
-            else
-            {
-                await JellyfinService.TriggerRefreshAsync(
-                    s.JellyfinUrl, creds.JellyfinApiKey, s.JellyfinLibraryName, ct).ConfigureAwait(false);
-            }
+            // 5. Tailscale teardown — after uploads AND the Jellyfin refresh,
+            //    and only when this batch connected it.
+            if (tailscaleConnectedByUs && tailscaleExe is not null)
+                await TailscaleService.DisconnectAsync(tailscaleExe, ct).ConfigureAwait(false);
         }
     }
 
