@@ -74,4 +74,23 @@ public class FileWatcherServiceTests : IDisposable
         Assert.True(FileWatcherService.IsMediaFile("raw.CR3"));
         Assert.False(FileWatcherService.IsMediaFile("document.pdf"));
     }
+
+    [Fact]
+    public void IsUnderDoneFolder_MatchesExactDoneFolder_AndSubdirectories()
+    {
+        var watcher = new FileWatcherService(_watchDir, _doneDir, _queue);
+
+        // Exact match of Done folder (with or without trailing slash)
+        Assert.True(watcher.IsUnderDoneFolder(_doneDir));
+        Assert.True(watcher.IsUnderDoneFolder(_doneDir + "\\"));
+
+        // Subdirectory inside Done folder
+        string subDone = Path.Combine(_doneDir, "2026", "09");
+        Assert.True(watcher.IsUnderDoneFolder(subDone));
+        Assert.True(watcher.IsUnderDoneFolder(Path.Combine(subDone, "photo.jpg")));
+
+        // Watch folder or sibling should NOT be under Done folder
+        Assert.False(watcher.IsUnderDoneFolder(_watchDir));
+        Assert.False(watcher.IsUnderDoneFolder(Path.Combine(_watchDir, "photo.jpg")));
+    }
 }

@@ -32,6 +32,8 @@ public partial class MainWindow : Window
         PooledConnectionLifetime = TimeSpan.FromMinutes(15)
     }) { Timeout = TimeSpan.FromSeconds(15) };
 
+    private readonly System.Windows.Threading.DispatcherTimer _statusTimer;
+
     /// <summary>
     /// Initializes a new instance of the <see cref="MainWindow"/> class.
     /// </summary>
@@ -40,6 +42,30 @@ public partial class MainWindow : Window
         InitializeComponent();
         LoadSettings();
         _ = RefreshQueueStatusAsync();
+
+        _statusTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(3)
+        };
+        _statusTimer.Tick += (_, _) =>
+        {
+            if (IsVisible && !IsExplicitExit)
+                _ = RefreshQueueStatusAsync();
+        };
+        _statusTimer.Start();
+
+        IsVisibleChanged += (_, e) =>
+        {
+            if ((bool)e.NewValue)
+            {
+                _ = RefreshQueueStatusAsync();
+                _statusTimer.Start();
+            }
+            else
+            {
+                _statusTimer.Stop();
+            }
+        };
     }
 
     /// <summary>
@@ -61,6 +87,7 @@ public partial class MainWindow : Window
             Hide();
             return;
         }
+        _statusTimer.Stop();
         base.OnClosing(e);
     }
 

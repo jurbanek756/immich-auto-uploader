@@ -65,6 +65,7 @@ public sealed class FileWatcherService : IDisposable
     });
 
     private readonly List<Task> _workerTasks = new();
+    private int _isScanning;
     private bool _disposed;
 
     /// <summary>
@@ -94,8 +95,8 @@ public sealed class FileWatcherService : IDisposable
         _watcher.Renamed += (_, e) => Note(e.FullPath);
         _watcher.Error += (_, e) =>
         {
-            AppLogger.Warn($"File watcher buffer overflow or error ({e.GetException().Message}); triggering full directory rescan.");
-            Task.Run(() => InitialScanAsync(_cts.Token));
+            AppLogger.Warn($"File watcher buffer overflow or error ({e.GetException().Message}); triggering directory rescan.");
+            TriggerRescan();
         };
     }
 
@@ -112,7 +113,29 @@ public sealed class FileWatcherService : IDisposable
             _workerTasks.Add(Task.Run(() => EnqueueWorkerLoopAsync(_cts.Token)));
         }
         AppLogger.Info($"Watching folder: {_watchFolder}");
-        _initialScanTask = Task.Run(() => InitialScanAsync(_cts.Token));
+        _initialScanTask = Task.Run(async () =>
+        {
+            if (Interlocked.CompareExchange(ref _isScanning, 1, 0) == 0)
+            {
+                try { await InitialScanAsync(_cts.Token).ConfigureAwait(false); }
+                finally { Volatile.Write(ref _isScanning, 0); }
+            }
+        });
+    }
+
+    /// <summary>
+    /// Triggers an asynchronous directory scan if one is not already actively in progress.
+    /// </summary>
+    private void TriggerRescan()
+    {
+        if (Interlocked.CompareExchange(ref _isScanning, 1, 0) == 0)
+        {
+            Task.Run(async () =>
+            {
+                try { await InitialScanAsync(_cts.Token).ConfigureAwait(false); }
+                finally { Volatile.Write(ref _isScanning, 0); }
+            });
+        }
     }
 
     // ------------------------------------------------------------------
@@ -426,14 +449,20 @@ public sealed class FileWatcherService : IDisposable
     /// Determines whether the specified path resides within or is equal to the Done folder.
     /// </summary>
     /// <param name="path">The file or directory path to check.</param>
-    /// <returns><c>true</c> if the path is inside the Done directory; otherwise, <c>false</c>.</returns>
-    private bool IsUnderDoneFolder(string path)
+    /// <returns><c>true</c> if the path is inside or identical to the Done directory; otherwise, <c>false</c>.</returns>
+    internal bool IsUnderDoneFolder(string path)
     {
         if (string.IsNullOrEmpty(_doneFolder))
             return false;
-        string normalizedDone = Path.TrimEndingDirectorySeparator(_doneFolder) + Path.DirectorySeparatorChar;
-        string full = Path.GetFullPath(path);
-        return full.StartsWith(normalizedDone, StringComparison.OrdinalIgnoreCase);
+
+        string cleanDone = Path.TrimEndingDirectorySeparator(_doneFolder);
+        string cleanPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+
+        if (string.Equals(cleanPath, cleanDone, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        string normalizedDone = cleanDone + Path.DirectorySeparatorChar;
+        return cleanPath.StartsWith(normalizedDone, StringComparison.OrdinalIgnoreCase);
     }
 
     private static long GetSizeSafe(string path)
@@ -455,6 +484,7 @@ public sealed class FileWatcherService : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        try { _watcher.EnableRaisingEvents = false; } catch { /* best effort */ }
         _cts.Cancel();
         _enqueueChannel.Writer.TryComplete();
         try { _settleTask?.Wait(TimeSpan.FromSeconds(3)); }

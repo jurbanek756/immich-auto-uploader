@@ -323,9 +323,10 @@ public sealed class UploadEngine : IDisposable
             return ProcessOutcome.Failed;
         }
 
+        bool pauseJobs = s.PauseImmichJobs && !string.IsNullOrWhiteSpace(creds.ImmichAdminApiKey);
         var req = new UploadRequest(
             s.ImmichGoPath, serverUrl, creds.ImmichApiKey, creds.ImmichAdminApiKey,
-            s.PauseImmichJobs, s.DeviceUuid, file.SourcePath);
+            pauseJobs, s.DeviceUuid, file.SourcePath);
 
         UploadResult result;
         try
@@ -376,11 +377,11 @@ public sealed class UploadEngine : IDisposable
     {
         if (string.IsNullOrEmpty(text)) return text;
         if (!string.IsNullOrEmpty(creds.ImmichApiKey))
-            text = text.Replace(creds.ImmichApiKey, "[REDACTED]");
+            text = text.Replace(creds.ImmichApiKey, "[REDACTED]", StringComparison.OrdinalIgnoreCase);
         if (!string.IsNullOrEmpty(creds.ImmichAdminApiKey))
-            text = text.Replace(creds.ImmichAdminApiKey, "[REDACTED]");
+            text = text.Replace(creds.ImmichAdminApiKey, "[REDACTED]", StringComparison.OrdinalIgnoreCase);
         if (!string.IsNullOrEmpty(creds.JellyfinApiKey))
-            text = text.Replace(creds.JellyfinApiKey, "[REDACTED]");
+            text = text.Replace(creds.JellyfinApiKey, "[REDACTED]", StringComparison.OrdinalIgnoreCase);
         return text;
     }
 
@@ -415,36 +416,32 @@ public sealed class UploadEngine : IDisposable
             if (!string.IsNullOrEmpty(dir))
                 Directory.CreateDirectory(dir);
 
-            string target = DedupePath(dest);
             bool copySucceeded = false;
+            string? lastTarget = null;
 
             // 2. Retry loop (up to 5 attempts) to accommodate antivirus scanners or transient sharing violations
             for (int attempt = 0; attempt < 5; attempt++)
             {
                 try
                 {
+                    string target = DedupePath(dest);
+                    lastTarget = target;
+
+                    // Check whether source and target share the same drive volume
+                    bool isCrossVolume = !string.Equals(
+                        Path.GetPathRoot(Path.GetFullPath(sourcePath)),
+                        Path.GetPathRoot(Path.GetFullPath(target)),
+                        StringComparison.OrdinalIgnoreCase);
+
+                    if (!isCrossVolume)
+                    {
+                        File.Move(sourcePath, target);
+                        return; // Fast atomic move succeeded on same volume
+                    }
+
+                    // Cross-volume: copy the file first, then delete original
                     if (!copySucceeded)
                     {
-                        // Check whether source and target share the same drive volume
-                        bool isCrossVolume = !string.Equals(
-                            Path.GetPathRoot(Path.GetFullPath(sourcePath)),
-                            Path.GetPathRoot(Path.GetFullPath(target)),
-                            StringComparison.OrdinalIgnoreCase);
-
-                        if (!isCrossVolume)
-                        {
-                            try
-                            {
-                                File.Move(sourcePath, target);
-                                return; // Fast atomic move succeeded on same volume
-                            }
-                            catch (IOException)
-                            {
-                                // Handles volume mount points, junction edges, or transient lock contention
-                            }
-                        }
-
-                        // Cross-volume or move fallback: copy the file first
                         File.Copy(sourcePath, target, overwrite: false);
                         copySucceeded = true;
                     }
@@ -460,11 +457,11 @@ public sealed class UploadEngine : IDisposable
                 }
             }
 
-            // 3. Orphan Cleanup: If source deletion failed after all retries, remove the copied target
+            // 3. Orphan Cleanup: If source deletion failed after all retries on cross-volume, remove the copied target
             // to avoid leaving orphaned duplicate files on the destination drive.
-            if (copySucceeded && File.Exists(sourcePath))
+            if (copySucceeded && File.Exists(sourcePath) && lastTarget is not null)
             {
-                try { File.Delete(target); }
+                try { File.Delete(lastTarget); }
                 catch { /* best effort cleanup */ }
             }
         }
@@ -506,7 +503,7 @@ public sealed class UploadEngine : IDisposable
         Task? active;
         lock (_batchTaskLock) { active = _activeBatchTask; }
         var tasksToWait = new[] { _loopTask, active }.Where(t => t != null).Cast<Task>().ToArray();
-        try { Task.WaitAll(tasksToWait, TimeSpan.FromSeconds(25)); }
+        try { Task.WaitAll(tasksToWait, TimeSpan.FromSeconds(35)); }
         catch { /* best effort */ }
 
         try
