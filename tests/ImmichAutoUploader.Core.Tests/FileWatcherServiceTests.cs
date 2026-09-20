@@ -93,4 +93,17 @@ public class FileWatcherServiceTests : IDisposable
         Assert.False(watcher.IsUnderDoneFolder(_watchDir));
         Assert.False(watcher.IsUnderDoneFolder(Path.Combine(_watchDir, "photo.jpg")));
     }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("invalid::path??*")]
+    [InlineData("C:\\valid\\folder\\sub\\file.jpg")]
+    public void IsUnderDoneFolder_HandlesInvalidOrNonMatchingPaths_ReturnsFalse(string path)
+    {
+        var watcher = new FileWatcherService(_watchDir, _doneDir, _queue);
+        var ex = Record.Exception(() => watcher.IsUnderDoneFolder(path));
+        Assert.Null(ex);
+        Assert.False(watcher.IsUnderDoneFolder(path));
+    }
 }

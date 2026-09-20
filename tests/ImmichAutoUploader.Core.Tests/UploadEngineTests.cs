@@ -189,4 +189,25 @@ public class UploadEngineTests : IDisposable
         Assert.True(File.Exists(expectedDest));
         Assert.False(File.Exists(sourceFile));
     }
+
+    [Fact]
+    public async Task MoveToDoneAsync_WhenSourceFileIsReadOnly_SuccessfullyMovesFile()
+    {
+        string sourceFile = Path.Combine(_watchDir, "readonly_photo.jpg");
+        File.WriteAllBytes(sourceFile, new byte[] { 50, 51, 52 });
+        File.SetAttributes(sourceFile, FileAttributes.ReadOnly);
+
+        var settings = new AppSettings
+        {
+            WatchFolder = _watchDir,
+            DoneFolder = _doneDir,
+        };
+
+        var ex = await Record.ExceptionAsync(() => UploadEngine.MoveToDoneAsync(sourceFile, settings));
+        Assert.Null(ex);
+
+        string expectedDest = Path.Combine(_doneDir, "readonly_photo.jpg");
+        Assert.True(File.Exists(expectedDest));
+        Assert.False(File.Exists(sourceFile));
+    }
 }

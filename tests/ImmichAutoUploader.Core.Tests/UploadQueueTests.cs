@@ -403,4 +403,27 @@ public class UploadQueueTests : IDisposable
         var stats = _queue.GetStats();
         Assert.Equal(1, stats.Pending);
     }
+
+    [Fact]
+    public async Task TryEnqueueAsync_FileRenamedWhileUploading_DoesNotRevertToPending()
+    {
+        string file1 = CreateTempMediaFile("uploading.jpg", new byte[] { 55, 56, 57 });
+        await _queue.TryEnqueueAsync(file1);
+
+        var batch = _queue.DequeueBatch(1);
+        Assert.Single(batch);
+        Assert.Equal("Uploading", batch[0].Status);
+
+        // Rename the file while it is currently in Uploading state
+        string file2 = Path.Combine(_tempTestDir, "renamed_while_uploading.jpg");
+        File.Move(file1, file2);
+
+        var res = await _queue.TryEnqueueAsync(file2);
+        Assert.Equal(EnqueueResult.AlreadyQueued, res);
+
+        // Ensure status remained Uploading and was not reverted to Pending
+        var stats = _queue.GetStats();
+        Assert.Equal(0, stats.Pending);
+        Assert.Equal(1, stats.Uploading);
+    }
 }

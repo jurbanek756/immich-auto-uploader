@@ -92,9 +92,9 @@ public sealed class UploadEngine : IDisposable
     /// </summary>
     private async Task LoopAsync(CancellationToken ct)
     {
-        try
+        while (!ct.IsCancellationRequested)
         {
-            while (!ct.IsCancellationRequested)
+            try
             {
                 int minutes = Math.Max(1, _getSettings().BatchIntervalMinutes);
                 await Task.Delay(TimeSpan.FromMinutes(minutes), ct).ConfigureAwait(false);
@@ -117,14 +117,15 @@ public sealed class UploadEngine : IDisposable
                     catch (ObjectDisposedException) { /* shutting down */ }
                 }
             }
-        }
-        catch (OperationCanceledException)
-        {
-            // Normal engine shutdown
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error("Upload engine loop crashed.", ex);
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Normal engine shutdown
+                break;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Error during periodic upload batch; will retry on next interval.", ex);
+            }
         }
     }
 
@@ -450,11 +451,17 @@ public sealed class UploadEngine : IDisposable
                         lastTarget = target;
                     }
 
-                    // Delete the original source file after successful copy
+                    // Delete the original source file after successful copy (strip ReadOnly if set)
+                    if (File.Exists(sourcePath))
+                    {
+                        var attr = File.GetAttributes(sourcePath);
+                        if ((attr & FileAttributes.ReadOnly) != 0)
+                            File.SetAttributes(sourcePath, attr & ~FileAttributes.ReadOnly);
+                    }
                     File.Delete(sourcePath);
                     return;
                 }
-                catch (IOException) when (attempt < 4)
+                catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException) && attempt < 4)
                 {
                     // Exponential delay between retries: 100ms, 200ms, 300ms, 400ms
                     await Task.Delay(100 * (attempt + 1), ct).ConfigureAwait(false);
@@ -465,7 +472,16 @@ public sealed class UploadEngine : IDisposable
             // to avoid leaving orphaned duplicate files on the destination drive.
             if (copySucceeded && File.Exists(sourcePath) && lastTarget is not null)
             {
-                try { File.Delete(lastTarget); }
+                try
+                {
+                    if (File.Exists(lastTarget))
+                    {
+                        var attr = File.GetAttributes(lastTarget);
+                        if ((attr & FileAttributes.ReadOnly) != 0)
+                            File.SetAttributes(lastTarget, attr & ~FileAttributes.ReadOnly);
+                        File.Delete(lastTarget);
+                    }
+                }
                 catch { /* best effort cleanup */ }
             }
         }

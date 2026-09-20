@@ -158,14 +158,22 @@ public partial class MainWindow : Window
                 return;
             }
             if (!string.IsNullOrWhiteSpace(TxtWatchFolder.Text) &&
-                !string.IsNullOrWhiteSpace(TxtDoneFolder.Text) &&
-                string.Equals(
-                    Path.GetFullPath(TxtWatchFolder.Text).TrimEnd(Path.DirectorySeparatorChar),
-                    Path.GetFullPath(TxtDoneFolder.Text).TrimEnd(Path.DirectorySeparatorChar),
-                    StringComparison.OrdinalIgnoreCase))
+                !string.IsNullOrWhiteSpace(TxtDoneFolder.Text))
             {
-                SetStatus("Done folder must be different from the watch folder.");
-                return;
+                string cleanWatch = Path.GetFullPath(TxtWatchFolder.Text).TrimEnd(Path.DirectorySeparatorChar);
+                string cleanDone = Path.GetFullPath(TxtDoneFolder.Text).TrimEnd(Path.DirectorySeparatorChar);
+
+                if (string.Equals(cleanWatch, cleanDone, StringComparison.OrdinalIgnoreCase))
+                {
+                    SetStatus("Done folder must be different from the watch folder.");
+                    return;
+                }
+
+                if (cleanWatch.StartsWith(cleanDone + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                {
+                    SetStatus("Done folder cannot be a parent directory of the watch folder.");
+                    return;
+                }
             }
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
@@ -469,15 +477,19 @@ public partial class MainWindow : Window
 
                 if (App.Queue is null)
                 {
-                    Dispatcher.Invoke(() => TxtQueueStatus.Text = "Queue not initialized.");
+                    try { Dispatcher.Invoke(() => TxtQueueStatus.Text = "Queue not initialized."); } catch { }
                     return;
                 }
                 var (pending, uploading, uploaded, failed) = App.Queue.GetStats();
                 if (!Dispatcher.HasShutdownStarted)
                 {
-                    Dispatcher.Invoke(() =>
-                        TxtQueueStatus.Text =
-                            $"Pending: {pending}    Uploading: {uploading}    Uploaded: {uploaded}    Failed: {failed}");
+                    try
+                    {
+                        Dispatcher.Invoke(() =>
+                            TxtQueueStatus.Text =
+                                $"Pending: {pending}    Uploading: {uploading}    Uploaded: {uploaded}    Failed: {failed}");
+                    }
+                    catch { /* shutdown race */ }
                 }
             }
             catch (Exception ex) when (ex is not TaskCanceledException)
