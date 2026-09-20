@@ -7,6 +7,18 @@ using ImmichAutoUploader.Core.Services;
 
 namespace ImmichAutoUploader.App;
 
+/// <summary>
+/// Application entry point and lifecycle orchestrator for the WPF desktop client.
+/// <para/>
+/// <b>Responsibilities:</b>
+/// <list type="bullet">
+///   <item><description>Enforces single-instance execution via a named Windows mutex (<c>Local\ImmichAutoUploader_SingleInstance</c>).</description></item>
+///   <item><description>Initializes settings, DPAPI credential storage, and the persistent SQLite upload queue.</description></item>
+///   <item><description>Executes crash recovery on startup (<see cref="UploadQueue.ResetStuckUploading"/>).</description></item>
+///   <item><description>Bootstraps background services (<see cref="FileWatcherService"/>, <see cref="UploadEngine"/>, and <see cref="TrayIconManager"/>).</description></item>
+///   <item><description>Orchestrates clean, orderly resource disposal on system shutdown or application exit.</description></item>
+/// </list>
+/// </summary>
 public partial class App : System.Windows.Application
 {
     private Mutex? _singleInstance;
@@ -14,12 +26,35 @@ public partial class App : System.Windows.Application
     private TrayIconManager? _tray;
     private FileWatcherService? _fileWatcher;
 
+    /// <summary>
+    /// Gets the shared settings persistence service.
+    /// </summary>
     public static SettingsService SettingsService { get; } = new();
+
+    /// <summary>
+    /// Gets the Windows DPAPI credential store for encrypted secret management.
+    /// </summary>
     public static ICredentialStore CredentialStore { get; } = new DpapiCredentialStore();
+
+    /// <summary>
+    /// Gets or sets the active in-memory application settings.
+    /// </summary>
     public static AppSettings Settings { get; set; } = new();
+
+    /// <summary>
+    /// Gets the singleton SQLite upload queue instance.
+    /// </summary>
     public static UploadQueue? Queue { get; private set; }
+
+    /// <summary>
+    /// Gets the singleton background upload engine instance.
+    /// </summary>
     public static UploadEngine? Engine { get; private set; }
 
+    /// <summary>
+    /// Handles application startup, initializes single-instance mutex, and bootstraps services.
+    /// </summary>
+    /// <param name="e">Startup arguments, including optional <c>--tray</c> flag.</param>
     protected override void OnStartup(StartupEventArgs e)
     {
         // Only one instance may run: a second watcher on the same folder would double-upload.
@@ -87,6 +122,9 @@ public partial class App : System.Windows.Application
         base.OnStartup(e);
     }
 
+    /// <summary>
+    /// Displays or restores the primary settings window.
+    /// </summary>
     private void ShowSettings()
     {
         // Reuse the single settings window; closing it hides to tray instead of exiting.
@@ -121,6 +159,9 @@ public partial class App : System.Windows.Application
         _fileWatcher.Start();
     }
 
+    /// <summary>
+    /// Disposes the current watcher and re-initializes it with updated paths from <see cref="Settings"/>.
+    /// </summary>
     public void RestartWatcher()
     {
         _fileWatcher?.Dispose();
@@ -148,12 +189,20 @@ public partial class App : System.Windows.Application
         }
     }
 
+    /// <summary>
+    /// Handles OS session ending (logoff or reboot) to ensure windows are marked for explicit exit.
+    /// </summary>
+    /// <param name="e">Session ending event arguments.</param>
     protected override void OnSessionEnding(SessionEndingCancelEventArgs e)
     {
         if (MainWindow is MainWindow w) w.IsExplicitExit = true;
         base.OnSessionEnding(e);
     }
 
+    /// <summary>
+    /// Performs graceful shutdown and resource cleanup of background services and the single-instance mutex.
+    /// </summary>
+    /// <param name="e">Exit event arguments.</param>
     protected override void OnExit(ExitEventArgs e)
     {
         Engine?.Dispose();

@@ -3,15 +3,34 @@ using System.Diagnostics;
 namespace ImmichAutoUploader.Core.Services;
 
 /// <summary>
-/// Small helper for running external processes (immich-go, tailscale).
-/// Arguments go through <see cref="ProcessStartInfo.ArgumentList"/> so no
-/// manual quoting is needed — important because API keys may contain
-/// characters the shell would mangle.
+/// Utility helper for executing external command-line executables (<c>immich-go</c>, <c>tailscale</c>, <c>where.exe</c>).
+/// <para/>
+/// <b>Safety Features:</b>
+/// <list type="bullet">
+///   <item><description>All arguments are passed through <see cref="ProcessStartInfo.ArgumentList"/> to eliminate command-line injection and quoting bugs.</description></item>
+///   <item><description>Custom environment variables can be injected without exposing them to system-wide scopes.</description></item>
+///   <item><description>Supports linked cancellation tokens and timeout limits, killing the entire process tree on cancellation.</description></item>
+/// </list>
 /// </summary>
 internal static class ProcessHelper
 {
+    /// <summary>
+    /// Encapsulates the execution results of an external process.
+    /// </summary>
+    /// <param name="ExitCode">The process exit code, or -1 if the process failed to start or timed out.</param>
+    /// <param name="StdOut">Captured standard output stream text.</param>
+    /// <param name="StdErr">Captured standard error stream text.</param>
+    /// <param name="TimedOut"><c>true</c> if execution was aborted due to exceeding the timeout threshold; otherwise, <c>false</c>.</param>
     public sealed record Result(int ExitCode, string StdOut, string StdErr, bool TimedOut);
 
+    /// <summary>
+    /// Asynchronously runs an external process with a specified timeout.
+    /// </summary>
+    /// <param name="exePath">The absolute path or executable name to launch.</param>
+    /// <param name="args">The list of discrete command-line arguments.</param>
+    /// <param name="timeoutMs">The maximum execution duration in milliseconds before terminating the process tree.</param>
+    /// <param name="ct">A cancellation token.</param>
+    /// <returns>A <see cref="Result"/> containing exit code and captured output streams.</returns>
     public static Task<Result> RunAsync(
         string exePath,
         IEnumerable<string> args,
@@ -19,6 +38,16 @@ internal static class ProcessHelper
         CancellationToken ct = default) =>
         RunAsync(exePath, args, timeoutMs, environment: null, ct);
 
+    /// <summary>
+    /// Asynchronously runs an external process with custom environment variables and a timeout.
+    /// </summary>
+    /// <param name="exePath">The absolute path or executable name to launch.</param>
+    /// <param name="args">The list of discrete command-line arguments.</param>
+    /// <param name="timeoutMs">The maximum execution duration in milliseconds before terminating the process tree.</param>
+    /// <param name="environment">Optional dictionary of environment variables to set for the child process.</param>
+    /// <param name="ct">A cancellation token.</param>
+    /// <returns>A <see cref="Result"/> containing exit code and captured output streams.</returns>
+    /// <exception cref="OperationCanceledException">Thrown when <paramref name="ct"/> is cancelled.</exception>
     public static async Task<Result> RunAsync(
         string exePath,
         IEnumerable<string> args,
@@ -49,7 +78,7 @@ internal static class ProcessHelper
             if (!process.Start())
                 return new Result(-1, string.Empty, "Failed to start process.", false);
 
-            // Kill the process if we're cancelled or the timeout fires.
+            // Terminate the process tree if cancellation or timeout occurs
             using var _ = linkedCts.Token.Register(() =>
             {
                 try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
@@ -98,7 +127,12 @@ internal static class ProcessHelper
         }
     }
 
-    /// <summary>Last N non-empty lines of a captured stream, for error reporting.</summary>
+    /// <summary>
+    /// Extracts the last N non-empty lines of text from a captured stream for compact diagnostic reporting.
+    /// </summary>
+    /// <param name="text">The stream text to trim.</param>
+    /// <param name="lines">The maximum number of trailing lines to return.</param>
+    /// <returns>A string containing at most <paramref name="lines"/> trailing lines joined by newlines.</returns>
     public static string Tail(string text, int lines)
     {
         var all = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);

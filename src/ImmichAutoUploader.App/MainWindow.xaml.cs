@@ -10,6 +10,18 @@ using WinForms = System.Windows.Forms;
 
 namespace ImmichAutoUploader.App;
 
+/// <summary>
+/// Primary desktop configuration and management window.
+/// <para/>
+/// <b>Features:</b>
+/// <list type="bullet">
+///   <item><description>Configures Immich, Jellyfin, and Tailscale connection settings.</description></item>
+///   <item><description>Performs interactive connection testing against Immich (<c>/api/users/me</c>) and Jellyfin (<c>/System/Info</c>).</description></item>
+///   <item><description>Displays real-time aggregate statistics from the SQLite upload queue.</description></item>
+///   <item><description>Provides manual controls to trigger an immediate batch ("Upload now") or requeue failed files.</description></item>
+///   <item><description>Configures automatic startup via the Windows CurrentUser Run registry key.</description></item>
+/// </list>
+/// </summary>
 public partial class MainWindow : Window
 {
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -20,6 +32,9 @@ public partial class MainWindow : Window
         PooledConnectionLifetime = TimeSpan.FromMinutes(15)
     }) { Timeout = TimeSpan.FromSeconds(15) };
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="MainWindow"/> class.
+    /// </summary>
     public MainWindow()
     {
         InitializeComponent();
@@ -27,9 +42,17 @@ public partial class MainWindow : Window
         _ = RefreshQueueStatusAsync();
     }
 
+    /// <summary>
+    /// Gets or sets a value indicating whether window close was explicitly requested
+    /// via the system tray or application shutdown. If <c>false</c>, closing the window
+    /// simply hides it to the system tray.
+    /// </summary>
     public bool IsExplicitExit { get; set; }
 
-    // Closing the window hides to tray; the app keeps running. Use tray -> Exit to quit.
+    /// <summary>
+    /// Intercepts the window closing event. Hides to the system tray unless <see cref="IsExplicitExit"/> is true.
+    /// </summary>
+    /// <param name="e">Event arguments allowing cancellation.</param>
     protected override void OnClosing(CancelEventArgs e)
     {
         if (!IsExplicitExit)
@@ -41,6 +64,9 @@ public partial class MainWindow : Window
         base.OnClosing(e);
     }
 
+    /// <summary>
+    /// Populates UI controls with values from <see cref="App.Settings"/> and <see cref="App.CredentialStore"/>.
+    /// </summary>
     private void LoadSettings()
     {
         AppSettings s = App.Settings;
@@ -76,6 +102,10 @@ public partial class MainWindow : Window
         CmbOnErrors.SelectedItem ??= CmbOnErrors.Items[0];
     }
 
+    /// <summary>
+    /// Validates inputs, saves non-secret settings to JSON, encrypts credentials via DPAPI,
+    /// updates Windows startup registry configuration, and restarts the file watcher.
+    /// </summary>
     private void Save_Click(object sender, RoutedEventArgs e)
     {
         if (!int.TryParse(TxtConcurrentTasks.Text, out int concurrent) || concurrent is < 1 or > 20)
@@ -194,6 +224,9 @@ public partial class MainWindow : Window
     private void BrowseDone_Click(object sender, RoutedEventArgs e)
         => TxtDoneFolder.Text = PickFolder(TxtDoneFolder.Text) ?? TxtDoneFolder.Text;
 
+    /// <summary>
+    /// Opens a Windows Forms folder browser dialog.
+    /// </summary>
     private static string? PickFolder(string current)
     {
         using var dlg = new WinForms.FolderBrowserDialog
@@ -205,6 +238,9 @@ public partial class MainWindow : Window
         return dlg.ShowDialog() == WinForms.DialogResult.OK ? dlg.SelectedPath : null;
     }
 
+    /// <summary>
+    /// Tests HTTP connectivity to the configured Immich instance and optional Jellyfin server.
+    /// </summary>
     private async void TestConnection_Click(object sender, RoutedEventArgs e)
     {
         var btn = sender as System.Windows.Controls.Button;
@@ -303,6 +339,10 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Configures or removes the application from the Windows CurrentUser Run registry key.
+    /// </summary>
+    /// <param name="enable"><c>true</c> to register the application with <c>--tray</c>; <c>false</c> to remove it.</param>
     internal static void ApplyStartWithWindows(bool enable)
     {
         using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
@@ -320,10 +360,16 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Updates the status bar text on the main window.
+    /// </summary>
     private void SetStatus(string message) => StatusText.Text = message;
 
     private void RefreshQueue_Click(object sender, RoutedEventArgs e) => _ = RefreshQueueStatusAsync();
 
+    /// <summary>
+    /// Triggers an immediate upload batch on demand.
+    /// </summary>
     private async void UploadNow_Click(object sender, RoutedEventArgs e)
     {
         var btn = sender as System.Windows.Controls.Button;
@@ -348,6 +394,9 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Resets all failed items back to pending and refreshes the queue status display.
+    /// </summary>
     private async void RetryFailed_Click(object sender, RoutedEventArgs e)
     {
         var btn = sender as System.Windows.Controls.Button;
@@ -370,6 +419,9 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Queries aggregate queue metrics from the database on a background thread and updates the UI.
+    /// </summary>
     private async Task RefreshQueueStatusAsync()
     {
         // Queue DB access is synchronous; hop off the UI thread to be safe.

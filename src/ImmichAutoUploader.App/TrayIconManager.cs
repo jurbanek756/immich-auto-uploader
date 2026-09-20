@@ -3,7 +3,7 @@ using WinForms = System.Windows.Forms;
 namespace ImmichAutoUploader.App;
 
 /// <summary>
-/// System tray icon: the app lives here when the settings window is closed.
+/// Manages the Windows notification area (system tray) presence, context menu, and desktop balloon notifications.
 /// </summary>
 public sealed class TrayIconManager : IDisposable
 {
@@ -11,6 +11,12 @@ public sealed class TrayIconManager : IDisposable
     private readonly WinForms.ContextMenuStrip _menu;
     private bool _disposed;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="TrayIconManager"/> class and configures context menu items.
+    /// </summary>
+    /// <param name="onOpen">Action invoked to display the settings window (triggered via double-click or menu item).</param>
+    /// <param name="onExit">Action invoked to cleanly terminate the application.</param>
+    /// <param name="onUploadNow">Optional action invoked when the "Upload now" menu item is clicked.</param>
     public TrayIconManager(Action onOpen, Action onExit, Action? onUploadNow = null)
     {
         _icon = new WinForms.NotifyIcon
@@ -36,11 +42,19 @@ public sealed class TrayIconManager : IDisposable
         _icon.BalloonTipTitle = "Immich Auto Uploader";
     }
 
+    /// <summary>
+    /// Displays a system tray balloon notification tip to the user.
+    /// </summary>
+    /// <param name="message">The notification text to display.</param>
+    /// <param name="icon">The severity icon (defaults to <see cref="WinForms.ToolTipIcon.Info"/>).</param>
     public void Notify(string message, WinForms.ToolTipIcon icon = WinForms.ToolTipIcon.Info)
     {
         _icon.ShowBalloonTip(timeout: 5000, "Immich Auto Uploader", message, icon);
     }
 
+    /// <summary>
+    /// Hides and disposes the notification icon and context menu.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed) return;

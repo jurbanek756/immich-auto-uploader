@@ -4,17 +4,18 @@ using System.Threading.Channels;
 namespace ImmichAutoUploader.Core.Services;
 
 /// <summary>
-/// Watches the watch folder for new photos/videos and feeds them into the <see cref="UploadQueue"/>.
+/// Monitors a target directory for new or updated photo and video files, debounces rapid file-system events,
+/// verifies file write completion, and feeds settled files into <see cref="UploadQueue"/>.
 /// <para/>
-/// Reliability details (learned the hard way):
+/// <b>Reliability & Concurrency Design:</b>
 /// <list type="bullet">
-///   <item>Events are debounced: a file must sit quiet for <c>_settleDelay</c> AND have a
-///         stable size before it's touched — a 4 GB video still copying is left alone.</item>
-///   <item>Zero-byte files are skipped with a warning (Immich rejects them; they used to
-///         kill whole upload runs).</item>
-///   <item>Temp files (~name, .tmp, .part, thumbs.db, …) and non-media extensions are ignored.</item>
-///   <item>On watcher buffer overflow, a full rescan runs so nothing is missed.</item>
-///   <item>Startup does an initial scan, catching files added while the app was closed.</item>
+///   <item><description><b>Settle Loop Debounce:</b> A file must remain quiet for <c>_settleDelay</c> (5 seconds) AND maintain an unchanged file size across consecutive timer checks before intake.</description></item>
+///   <item><description><b>Exclusive Lock Detection:</b> Files being actively written by camera ingestion or file transfer tools are tested with a non-locking read stream before proceeding.</description></item>
+///   <item><description><b>Bounded Channel Pipeline:</b> Settled file paths are buffered into a bounded channel (capacity 2000) consumed by 4 concurrent background worker tasks, isolating file-system events from SQLite operations.</description></item>
+///   <item><description><b>Modification Retention During Hashing:</b> Uses a sentinel timestamp (<see cref="DateTime.MaxValue"/>) to prevent duplicate intake while preserving new events if a file is rewritten during hashing.</description></item>
+///   <item><description><b>Zero-Byte Handling:</b> Files with zero bytes are caught early and skipped with an informational warning instead of failing during upload.</description></item>
+///   <item><description><b>Buffer Overflow Recovery:</b> If the 64 KB <see cref="FileSystemWatcher"/> internal buffer overflows, an automatic asynchronous rescan ensures no files are lost.</description></item>
+///   <item><description><b>Initial Startup Scan:</b> Runs an asynchronous depth-first search on startup to ingest files added while the application was closed.</description></item>
 /// </list>
 /// </summary>
 public sealed class FileWatcherService : IDisposable
@@ -26,11 +27,11 @@ public sealed class FileWatcherService : IDisposable
 
     private static readonly HashSet<string> MediaExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        // images
+        // Images
         ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".tiff", ".tif", ".bmp", ".gif",
-        // RAW
+        // RAW Formats
         ".cr2", ".cr3", ".nef", ".arw", ".dng", ".rw2", ".orf", ".raf",
-        // video
+        // Videos
         ".mp4", ".mov", ".avi", ".mkv", ".m4v", ".3gp", ".3g2", ".webm",
         ".mts", ".m2ts", ".mpg", ".mpeg",
     };
@@ -39,21 +40,39 @@ public sealed class FileWatcherService : IDisposable
     private readonly string _doneFolder;
     private readonly UploadQueue _queue;
     private readonly FileSystemWatcher _watcher;
+
+    /// <summary>
+    /// Tracks files undergoing debounce settling.
+    /// Key: Normalized file path.
+    /// Value: (lastEvent: UTC time of last event or sentinel, lastSize: observed byte length, isAvailable: lock check passed).
+    /// </summary>
     private readonly ConcurrentDictionary<string, (DateTime lastEvent, long lastSize, bool isAvailable)> _pending =
         new(StringComparer.OrdinalIgnoreCase);
+
     private readonly CancellationTokenSource _cts = new();
     private Task? _initialScanTask;
     private Task? _settleTask;
     private readonly TimeSpan _settleDelay = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Bounded producer-consumer channel decoupling the settle loop from the hashing/enqueueing workers.
+    /// </summary>
     private readonly Channel<string> _enqueueChannel = Channel.CreateBounded<string>(new BoundedChannelOptions(2000)
     {
         FullMode = BoundedChannelFullMode.Wait,
         SingleReader = false,
         SingleWriter = true,
     });
+
     private readonly List<Task> _workerTasks = new();
     private bool _disposed;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="FileWatcherService"/> class.
+    /// </summary>
+    /// <param name="watchFolder">The directory to watch recursively for media files.</param>
+    /// <param name="doneFolder">The destination directory for completed uploads (ignored by the watcher to prevent feedback loops).</param>
+    /// <param name="queue">The persistent upload queue to receive settled files.</param>
     public FileWatcherService(string watchFolder, string doneFolder, UploadQueue queue)
     {
         _watchFolder = Path.GetFullPath(watchFolder);
@@ -68,18 +87,22 @@ public sealed class FileWatcherService : IDisposable
             Filter = "*.*",
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite |
                            NotifyFilters.Size | NotifyFilters.DirectoryName,
-            InternalBufferSize = 65536,
+            InternalBufferSize = 65536, // Maximum recommended buffer size (64 KB) to mitigate event drops
         };
         _watcher.Created += (_, e) => Note(e.FullPath);
         _watcher.Changed += (_, e) => Note(e.FullPath);
         _watcher.Renamed += (_, e) => Note(e.FullPath);
         _watcher.Error += (_, e) =>
         {
-            AppLogger.Warn($"File watcher error ({e.GetException().Message}); running full rescan.");
+            AppLogger.Warn($"File watcher buffer overflow or error ({e.GetException().Message}); triggering full directory rescan.");
             Task.Run(() => InitialScanAsync(_cts.Token));
         };
     }
 
+    /// <summary>
+    /// Starts the file watcher, launches the background settle loop, spawns worker tasks,
+    /// and begins an asynchronous initial directory scan.
+    /// </summary>
     public void Start()
     {
         _watcher.EnableRaisingEvents = true;
@@ -96,6 +119,11 @@ public sealed class FileWatcherService : IDisposable
     // Classification helpers (also used by UploadQueue)
     // ------------------------------------------------------------------
 
+    /// <summary>
+    /// Determines whether the specified file path represents a temporary, lock, or operating system metadata file.
+    /// </summary>
+    /// <param name="path">The file path to test.</param>
+    /// <returns><c>true</c> if the file matches known temporary patterns; otherwise, <c>false</c>.</returns>
     public static bool IsTempFile(string path)
     {
         string name = Path.GetFileName(path);
@@ -106,6 +134,11 @@ public sealed class FileWatcherService : IDisposable
         return TempExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Determines whether the specified file path has a supported photo, video, or RAW image extension.
+    /// </summary>
+    /// <param name="path">The file path to test.</param>
+    /// <returns><c>true</c> if the extension is recognized as media; otherwise, <c>false</c>.</returns>
     public static bool IsMediaFile(string path) =>
         MediaExtensions.Contains(Path.GetExtension(path));
 
@@ -113,21 +146,32 @@ public sealed class FileWatcherService : IDisposable
     // Event intake + settle loop
     // ------------------------------------------------------------------
 
+    /// <summary>
+    /// Records a file-system event for a path, placing or updating it in <see cref="_pending"/>.
+    /// </summary>
+    /// <param name="path">The path that experienced an event.</param>
     private void Note(string path)
     {
         try
         {
             if (Directory.Exists(path))
-                return; // we only care about files
+                return; // Directories are ignored; subdirectories are monitored via recursive watcher
         }
         catch { return; }
 
         if (IsTempFile(path) || !IsMediaFile(path) || IsUnderDoneFolder(path))
             return;
 
+        // Reset the event timestamp and availability state.
+        // NOTE: If the file is currently being hashed in EnqueueAndLogAsync (which sets lastEvent = DateTime.MaxValue),
+        // a new file write event will overwrite it with DateTime.UtcNow.
+        // This ensures the file will NOT be removed by RemovePendingIfSentinel and will be re-evaluated.
         _pending[path] = (DateTime.UtcNow, GetSizeSafe(path), false);
     }
 
+    /// <summary>
+    /// Periodic loop that inspects <see cref="_pending"/> files every 2 seconds to evaluate debounce criteria.
+    /// </summary>
     private async Task SettleLoopAsync(CancellationToken ct)
     {
         try
@@ -138,7 +182,7 @@ public sealed class FileWatcherService : IDisposable
         }
         catch (OperationCanceledException)
         {
-            // shutting down
+            // Normal shutdown
         }
         catch (Exception ex)
         {
@@ -146,6 +190,9 @@ public sealed class FileWatcherService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Iterates through pending files and verifies whether they have fully settled and are ready for enqueueing.
+    /// </summary>
     private void ProcessSettled()
     {
         DateTime now = DateTime.UtcNow;
@@ -154,26 +201,35 @@ public sealed class FileWatcherService : IDisposable
             string path = kvp.Key;
             var (lastEvent, lastSize, isAvailable) = kvp.Value;
 
+            // 1. Time Debounce: File must experience no new events for at least _settleDelay (5 seconds).
+            // (Note: If lastEvent is DateTime.MaxValue sentinel, now - lastEvent is negative, correctly skipping it).
             if (now - lastEvent < _settleDelay)
                 continue;
 
             long size = GetSizeSafe(path);
             if (size < 0)
             {
-                _pending.TryRemove(path, out _); // deleted before it settled
+                // File was deleted or became inaccessible before it settled
+                _pending.TryRemove(path, out _);
                 continue;
             }
+
+            // 2. Size Debounce: File size must match the size observed on the previous tick.
+            // If it changed, the file is still actively being copied or written; update size and continue waiting.
             if (size != lastSize)
             {
-                _pending[path] = (now, size, false); // still being written; wait more
+                _pending[path] = (now, size, false);
                 continue;
             }
+
+            // 3. Safety Check: Verify the file is not within the Done directory
             if (IsUnderDoneFolder(path))
             {
                 _pending.TryRemove(path, out _);
                 continue;
             }
 
+            // 4. Attributes Check: Ignore directories, hidden files, and system files
             var attrs = GetAttributesSafe(path);
             if (attrs.HasFlag(FileAttributes.Directory) ||
                 attrs.HasFlag(FileAttributes.Hidden) ||
@@ -183,28 +239,36 @@ public sealed class FileWatcherService : IDisposable
                 continue;
             }
 
+            // 5. Exclusive Lock Check: Test if another process holds an exclusive write lock
             if (!isAvailable)
             {
                 if (!IsFileAvailable(path))
                 {
-                    _pending[path] = (now, size, false); // Writer still has the file open; wait more
+                    _pending[path] = (now, size, false); // Writer still has the file open; wait for next tick
                     continue;
                 }
             }
 
-            // Write to the bounded channel. Keep in _pending with sentinel timestamp until enqueued.
+            // 6. Enqueue Hand-off: Write to the bounded channel.
+            // Mark lastEvent = DateTime.MaxValue as a sentinel.
+            // This prevents duplicate channel writes while workers hash the file.
             if (_enqueueChannel.Writer.TryWrite(path))
             {
                 _pending[path] = (DateTime.MaxValue, size, true);
             }
             else
             {
-                // Channel is full. Mark as available so we don't repeatedly open file handles every tick.
+                // Channel is full (backpressure). Mark as available so we don't repeatedly open file handles every tick.
                 _pending[path] = (now - _settleDelay, size, true);
             }
         }
     }
 
+    /// <summary>
+    /// Attempts to open a file with shared read-write access to verify it is not exclusively locked by another process.
+    /// </summary>
+    /// <param name="path">The file path to test.</param>
+    /// <returns><c>true</c> if the file can be opened for reading; otherwise, <c>false</c>.</returns>
     private static bool IsFileAvailable(string path)
     {
         try
@@ -222,6 +286,9 @@ public sealed class FileWatcherService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Consumer loop executed by worker tasks, reading settled file paths from the bounded channel.
+    /// </summary>
     private async Task EnqueueWorkerLoopAsync(CancellationToken ct)
     {
         try
@@ -237,7 +304,7 @@ public sealed class FileWatcherService : IDisposable
         }
         catch (OperationCanceledException)
         {
-            // shutting down
+            // Normal shutdown
         }
         catch (Exception ex)
         {
@@ -245,6 +312,10 @@ public sealed class FileWatcherService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Hashes the settled file and enqueues it into <see cref="UploadQueue"/>.
+    /// Manages sentinel cleanup and modification retention.
+    /// </summary>
     private async Task EnqueueAndLogAsync(string path, CancellationToken ct)
     {
         try
@@ -277,12 +348,12 @@ public sealed class FileWatcherService : IDisposable
         }
         catch (OperationCanceledException)
         {
-            // shutting down: reset timestamp so it can be retried on next startup
+            // Shutting down: Reset timestamp so the file is re-evaluated on next application startup
             _pending[path] = (DateTime.UtcNow, GetSizeSafe(path), false);
         }
         catch (IOException ex)
         {
-            // Transient lock or sharing violation: reset timestamp so it retries on next settle check
+            // Transient lock or sharing violation: Reset timestamp to trigger retry on next settle check
             AppLogger.Warn($"Transient I/O error queueing {path}, will retry: {ex.Message}");
             _pending[path] = (DateTime.UtcNow, GetSizeSafe(path), false);
         }
@@ -293,6 +364,12 @@ public sealed class FileWatcherService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Removes the file from <see cref="_pending"/> only if its timestamp matches the sentinel (<see cref="DateTime.MaxValue"/>).
+    /// If the timestamp was overwritten by <see cref="Note"/> due to a file modification while hashing,
+    /// the entry is retained so the updated content will be settled and queued.
+    /// </summary>
+    /// <param name="path">The file path to check and remove.</param>
     private void RemovePendingIfSentinel(string path)
     {
         if (_pending.TryGetValue(path, out var current) && current.lastEvent == DateTime.MaxValue)
@@ -301,6 +378,9 @@ public sealed class FileWatcherService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Performs an asynchronous depth-first search of the watch directory to discover files added while offline.
+    /// </summary>
     private async Task InitialScanAsync(CancellationToken ct)
     {
         try
@@ -330,7 +410,7 @@ public sealed class FileWatcherService : IDisposable
                         continue;
                     _pending[f] = (DateTime.UtcNow, GetSizeSafe(f), false);
                     if (++found % 500 == 0)
-                        await Task.Yield();
+                        await Task.Yield(); // Yield control periodically during massive directory scans
                 }
             }
 
@@ -342,6 +422,11 @@ public sealed class FileWatcherService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Determines whether the specified path resides within or is equal to the Done folder.
+    /// </summary>
+    /// <param name="path">The file or directory path to check.</param>
+    /// <returns><c>true</c> if the path is inside the Done directory; otherwise, <c>false</c>.</returns>
     private bool IsUnderDoneFolder(string path)
     {
         if (string.IsNullOrEmpty(_doneFolder))
@@ -363,6 +448,9 @@ public sealed class FileWatcherService : IDisposable
         catch { return (FileAttributes)0; }
     }
 
+    /// <summary>
+    /// Disposes the file watcher, completes the channel, and awaits background worker task shutdown.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed) return;

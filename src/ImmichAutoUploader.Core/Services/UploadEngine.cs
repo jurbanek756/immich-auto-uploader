@@ -4,24 +4,19 @@ using ImmichAutoUploader.Core.Models;
 namespace ImmichAutoUploader.Core.Services;
 
 /// <summary>
-/// Background upload engine: every <see cref="AppSettings.BatchIntervalMinutes"/>
-/// (or on demand) it takes up to <see cref="AppSettings.MaxFilesPerBatch"/> files
-/// from the queue and uploads each with its own immich-go process.
+/// Background orchestration engine that periodically dequeues files from <see cref="UploadQueue"/>
+/// and executes per-file uploads via <see cref="ImmichGoRunner"/>.
 /// <para/>
-/// Batch flow:
+/// <b>Batch Lifecycle Workflow:</b>
 /// <list type="number">
-///   <item>Tailscale: if enabled and the queue has due work, ensure it's connected
-///   first — then disconnect it again after the batch (Jellyfin refresh included),
-///   but only if this batch was the one that brought it up.</item>
-///   <item>Dequeue files whose retry backoff has expired.</item>
-///   <item>Upload each file (up to <see cref="AppSettings.ConcurrentTasks"/> at once).</item>
-///   <item>Success → mark uploaded, move the original to the Done folder
-///         (relative path preserved), count it.</item>
-///   <item>Failure → mark failed with exponential backoff; the file stays queued.</item>
-///   <item>If anything was uploaded and Jellyfin is configured → trigger a refresh.</item>
+///   <item><description><b>Tailscale Pre-Flight:</b> If enabled and work is due, ensures Tailscale is connected prior to starting uploads.</description></item>
+///   <item><description><b>Batch Dequeue:</b> Retrieves up to <see cref="AppSettings.MaxFilesPerBatch"/> items that are pending or due for retry.</description></item>
+///   <item><description><b>Parallel Uploads:</b> Spawns up to <see cref="AppSettings.ConcurrentTasks"/> concurrent worker tasks, each invoking a distinct <c>immich-go</c> process.</description></item>
+///   <item><description><b>Move-to-Done:</b> Upon exit code 0, atomically moves the source file to <see cref="AppSettings.DoneFolder"/>, preserving subfolder hierarchy and handling cross-volume moves.</description></item>
+///   <item><description><b>Exponential Backoff:</b> Upon failure, records the error and computes an exponential backoff timestamp.</description></item>
+///   <item><description><b>Jellyfin Sync:</b> If at least one file uploaded successfully, triggers a library refresh.</description></item>
+///   <item><description><b>Tailscale Post-Flight:</b> Disconnects Tailscale only if this batch established the connection.</description></item>
 /// </list>
-/// Settings and credentials are read fresh for every batch, so Save applies
-/// without restarting the app.
 /// </summary>
 public sealed class UploadEngine : IDisposable
 {
@@ -35,9 +30,17 @@ public sealed class UploadEngine : IDisposable
     private Task? _loopTask;
     private bool _disposed;
 
-    /// <summary>Called for things the user should see (auth needed, batch failures).</summary>
+    /// <summary>
+    /// Callback invoked to surface actionable alerts to the user (e.g., VPN login required, batch failures).
+    /// </summary>
     public Action<string>? NotifyUser { get; set; }
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="UploadEngine"/> class.
+    /// </summary>
+    /// <param name="queue">The persistent SQLite upload queue.</param>
+    /// <param name="getSettings">Delegate returning fresh application settings on each batch execution.</param>
+    /// <param name="getCredentials">Delegate resolving fresh DPAPI credentials on each batch execution.</param>
     public UploadEngine(
         UploadQueue queue,
         Func<AppSettings> getSettings,
@@ -48,6 +51,9 @@ public sealed class UploadEngine : IDisposable
         _getCredentials = getCredentials;
     }
 
+    /// <summary>
+    /// Starts the background periodic execution loop.
+    /// </summary>
     public void Start()
     {
         _loopTask = LoopAsync(_cts.Token);
@@ -55,8 +61,9 @@ public sealed class UploadEngine : IDisposable
     }
 
     /// <summary>
-    /// Run a batch right now. Returns false if a batch is already running.
+    /// Triggers an immediate upload batch on demand.
     /// </summary>
+    /// <returns><c>true</c> if a batch was started; <c>false</c> if a batch is already in progress.</returns>
     public async Task<bool> TriggerNowAsync()
     {
         if (!await _batchLock.WaitAsync(0).ConfigureAwait(false))
@@ -80,6 +87,9 @@ public sealed class UploadEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Periodic timer loop that triggers batches according to <see cref="AppSettings.BatchIntervalMinutes"/>.
+    /// </summary>
     private async Task LoopAsync(CancellationToken ct)
     {
         try
@@ -110,7 +120,7 @@ public sealed class UploadEngine : IDisposable
         }
         catch (OperationCanceledException)
         {
-            // shutting down
+            // Normal engine shutdown
         }
         catch (Exception ex)
         {
@@ -125,6 +135,9 @@ public sealed class UploadEngine : IDisposable
         Skipped,
     }
 
+    /// <summary>
+    /// Coordinates the full lifecycle of an upload batch.
+    /// </summary>
     private async Task RunBatchCoreAsync(CancellationToken ct)
     {
         AppSettings s;
@@ -151,9 +164,7 @@ public sealed class UploadEngine : IDisposable
             return;
         }
 
-        // 1. Tailscale hook — only when there is actually something to upload.
-        //    The connection is torn down again in the finally below, but only
-        //    if this batch was the one that brought it up.
+        // 1. Tailscale pre-flight hook: Only run if there is active work due in the queue.
         string serverUrl = s.ImmichUrl;
         string? tailscaleExe = null;
         bool tailscaleConnectedByUs = false;
@@ -190,7 +201,7 @@ public sealed class UploadEngine : IDisposable
 
         try
         {
-            // 2. Dequeue
+            // 2. Dequeue files ready for upload
             var batch = _queue.DequeueBatch(Math.Max(1, s.MaxFilesPerBatch));
             if (batch.Count == 0)
                 return;
@@ -198,7 +209,7 @@ public sealed class UploadEngine : IDisposable
             if (s.PauseImmichJobs && string.IsNullOrEmpty(creds.ImmichAdminApiKey))
                 AppLogger.Warn("PauseImmichJobs is on but no admin API key is set; server jobs will not be paused.");
 
-            // 3. Upload
+            // 3. Process files in parallel up to ConcurrentTasks
             AppLogger.Info($"Upload batch started: {batch.Count} file(s) → {serverUrl}.");
             int uploaded = 0, failed = 0;
             var sw = Stopwatch.StartNew();
@@ -242,11 +253,11 @@ public sealed class UploadEngine : IDisposable
             }
             catch (OperationCanceledException)
             {
-                // shutting down mid-batch; queued rows stay consistent
+                // Batch interrupted or shutting down; uncompleted rows are safely restored below
             }
             finally
             {
-                // Revert any dequeued files that were not processed back to Pending
+                // Revert any dequeued files that were not processed (due to cancellation or 'stop on error') back to Pending
                 var unprocessedIds = batch.Select(b => b.Id).Except(processedIds);
                 _queue.RevertToPending(unprocessedIds);
             }
@@ -256,7 +267,7 @@ public sealed class UploadEngine : IDisposable
             if (failed > 0)
                 NotifyUser?.Invoke($"Upload batch finished: {uploaded} uploaded, {failed} failed. Check the log for details.");
 
-            // 4. Jellyfin hook — only when something actually landed on the server.
+            // 4. Jellyfin post-upload hook: Trigger refresh only if at least one file was uploaded
             if (uploaded > 0 && !string.IsNullOrWhiteSpace(s.JellyfinUrl))
             {
                 if (string.IsNullOrWhiteSpace(creds.JellyfinApiKey))
@@ -272,9 +283,9 @@ public sealed class UploadEngine : IDisposable
         }
         finally
         {
-            // 5. Tailscale teardown — after uploads AND the Jellyfin refresh,
-            //    and only when this batch connected it. Use a fresh timeout token so
-            //    disconnection is not aborted if ct is already cancelled.
+            // 5. Tailscale post-flight teardown:
+            // Tear down connection only if this batch was the one that initiated it.
+            // Uses a fresh timeout token to guarantee cleanup even if the batch cancellation token fired.
             if (tailscaleConnectedByUs && tailscaleExe is not null)
             {
                 using var cleanupCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -283,10 +294,13 @@ public sealed class UploadEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Validates, uploads, and archives an individual file.
+    /// </summary>
     private async Task<ProcessOutcome> ProcessFileAsync(
         QueuedFile file, AppSettings s, EngineCredentials creds, string serverUrl, CancellationToken ct)
     {
-        // Re-validate: the file may have been moved or deleted since it was queued.
+        // Re-validate the file before spawning child process: it may have been moved or deleted since enqueued
         FileInfo fi;
         try
         {
@@ -352,6 +366,12 @@ public sealed class UploadEngine : IDisposable
         return ProcessOutcome.Uploaded;
     }
 
+    /// <summary>
+    /// Scans text output and masks API keys with <c>[REDACTED]</c> before writing to logs or UI.
+    /// </summary>
+    /// <param name="text">The string to sanitize.</param>
+    /// <param name="creds">The active credentials to match and redact.</param>
+    /// <returns>The sanitized string with all secrets masked.</returns>
     public static string RedactSecrets(string text, EngineCredentials creds)
     {
         if (string.IsNullOrEmpty(text)) return text;
@@ -364,15 +384,32 @@ public sealed class UploadEngine : IDisposable
         return text;
     }
 
+    /// <summary>
+    /// Moves an uploaded media file to <see cref="AppSettings.DoneFolder"/> while preserving its relative subfolder path.
+    /// <para/>
+    /// <b>Cross-Volume &amp; Locking Resilience:</b>
+    /// <list type="bullet">
+    ///   <item><description><b>Path Preservation:</b> Resolves relative path against <see cref="AppSettings.WatchFolder"/>.</description></item>
+    ///   <item><description><b>Collision Handling:</b> Appends numeric suffixes (<c> (2)</c>, <c> (3)</c>) if a file with the same name already exists in the destination.</description></item>
+    ///   <item><description><b>Cross-Volume Copy-Delete:</b> If source and destination reside on different volumes (or across network mounts), falls back to copy + delete with up to 5 retries.</description></item>
+    ///   <item><description><b>Orphan Cleanup:</b> If the source file cannot be deleted after copying (e.g. due to a persistent lock), the copied target is removed to avoid leaving duplicate files.</description></item>
+    ///   <item><description><b>Data Safety Guarantee:</b> If moving fails completely, the file remains in the watch folder. Because its hash is already in the <c>uploaded</c> table, it is safely skipped on future scans.</description></item>
+    /// </list>
+    /// </summary>
+    /// <param name="sourcePath">The absolute path of the uploaded file.</param>
+    /// <param name="s">Current application configuration containing watch and done folder paths.</param>
+    /// <param name="ct">A cancellation token.</param>
     public static async Task MoveToDoneAsync(string sourcePath, AppSettings s, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(s.DoneFolder))
             return;
         try
         {
+            // 1. Calculate relative destination path to preserve directory structure
             string relative = Path.GetRelativePath(s.WatchFolder, sourcePath);
             if (Path.IsPathRooted(relative) || relative.StartsWith("..", StringComparison.Ordinal))
-                relative = Path.GetFileName(sourcePath); // cross-volume or outside watch folder; flat move
+                relative = Path.GetFileName(sourcePath); // Cross-volume or outside watch folder: fall back to flat move
+
             string dest = Path.Combine(s.DoneFolder, relative);
             string? dir = Path.GetDirectoryName(dest);
             if (!string.IsNullOrEmpty(dir))
@@ -381,13 +418,14 @@ public sealed class UploadEngine : IDisposable
             string target = DedupePath(dest);
             bool copySucceeded = false;
 
-            // Retry up to 5 times for concurrent moves or transient file locks
+            // 2. Retry loop (up to 5 attempts) to accommodate antivirus scanners or transient sharing violations
             for (int attempt = 0; attempt < 5; attempt++)
             {
                 try
                 {
                     if (!copySucceeded)
                     {
+                        // Check whether source and target share the same drive volume
                         bool isCrossVolume = !string.Equals(
                             Path.GetPathRoot(Path.GetFullPath(sourcePath)),
                             Path.GetPathRoot(Path.GetFullPath(target)),
@@ -398,28 +436,32 @@ public sealed class UploadEngine : IDisposable
                             try
                             {
                                 File.Move(sourcePath, target);
-                                return;
+                                return; // Fast atomic move succeeded on same volume
                             }
                             catch (IOException)
                             {
-                                // Handles volume mount points / junction edges or sharing violations
+                                // Handles volume mount points, junction edges, or transient lock contention
                             }
                         }
 
+                        // Cross-volume or move fallback: copy the file first
                         File.Copy(sourcePath, target, overwrite: false);
                         copySucceeded = true;
                     }
 
+                    // Delete the original source file after successful copy
                     File.Delete(sourcePath);
                     return;
                 }
                 catch (IOException) when (attempt < 4)
                 {
+                    // Exponential delay between retries: 100ms, 200ms, 300ms, 400ms
                     await Task.Delay(100 * (attempt + 1), ct).ConfigureAwait(false);
                 }
             }
 
-            // If deletion of source failed after all retries, clean up the copied target to prevent orphaned duplicates
+            // 3. Orphan Cleanup: If source deletion failed after all retries, remove the copied target
+            // to avoid leaving orphaned duplicate files on the destination drive.
             if (copySucceeded && File.Exists(sourcePath))
             {
                 try { File.Delete(target); }
@@ -434,6 +476,9 @@ public sealed class UploadEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Generates a non-colliding file path by appending numeric suffixes (<c> (2)</c>, <c> (3)</c>) if the destination file already exists.
+    /// </summary>
     private static string DedupePath(string dest)
     {
         if (!File.Exists(dest))
@@ -449,6 +494,9 @@ public sealed class UploadEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Cancels active loops and waits for active batch tasks to complete.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed) return;

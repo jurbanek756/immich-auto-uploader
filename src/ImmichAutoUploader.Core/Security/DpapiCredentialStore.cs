@@ -4,18 +4,35 @@ using System.Text;
 namespace ImmichAutoUploader.Core.Security;
 
 /// <summary>
-/// Windows DPAPI credential store (CurrentUser scope).
-/// Secrets are encrypted by the OS and stored as opaque blobs under %AppData%.
-/// Only the same Windows user on the same machine can decrypt them.
+/// Windows Data Protection API (DPAPI) implementation of <see cref="ICredentialStore"/>.
+/// <para/>
+/// Credentials are encrypted using the current user's Windows credentials via
+/// <see cref="DataProtectionScope.CurrentUser"/> and stored as opaque binary files in
+/// <c>%AppData%\ImmichAutoUploader\secrets\</c>. Only processes running under the
+/// same Windows user account on the same physical computer can decrypt them.
 /// </summary>
 public sealed class DpapiCredentialStore : ICredentialStore
 {
+    /// <summary>
+    /// Gets the absolute directory path where encrypted credential blobs are stored.
+    /// </summary>
     private static string SecretsDir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "ImmichAutoUploader", "secrets");
 
+    /// <summary>
+    /// Computes the absolute file path for a named credential blob.
+    /// </summary>
+    /// <param name="name">The unique credential slot name.</param>
+    /// <returns>The path ending in <c>.bin</c> within <see cref="SecretsDir"/>.</returns>
     private static string PathFor(string name) => Path.Combine(SecretsDir, name + ".bin");
 
+    /// <summary>
+    /// Encrypts the provided secret using Windows DPAPI and atomically writes it to disk.
+    /// </summary>
+    /// <param name="name">The unique identifier for the credential.</param>
+    /// <param name="secret">The plaintext secret value to encrypt.</param>
+    /// <exception cref="PlatformNotSupportedException">Thrown when executed on a non-Windows operating system.</exception>
     public void Save(string name, string secret)
     {
         if (!OperatingSystem.IsWindows())
@@ -30,6 +47,12 @@ public sealed class DpapiCredentialStore : ICredentialStore
         File.Move(tempPath, destPath, overwrite: true);
     }
 
+    /// <summary>
+    /// Reads and decrypts a DPAPI-protected secret from disk.
+    /// </summary>
+    /// <param name="name">The unique identifier for the credential.</param>
+    /// <returns>The decrypted plaintext string, or <c>null</c> if the credential file does not exist or decryption fails.</returns>
+    /// <exception cref="PlatformNotSupportedException">Thrown when executed on a non-Windows operating system.</exception>
     public string? Load(string name)
     {
         if (!OperatingSystem.IsWindows())
@@ -51,10 +74,15 @@ public sealed class DpapiCredentialStore : ICredentialStore
         }
         catch (CryptographicException)
         {
+            // Decryption failed (e.g., file was transferred from another machine or user).
             return null;
         }
     }
 
+    /// <summary>
+    /// Deletes the encrypted credential file associated with the specified name.
+    /// </summary>
+    /// <param name="name">The unique identifier for the credential.</param>
     public void Delete(string name)
     {
         string path = PathFor(name);

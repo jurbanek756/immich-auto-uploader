@@ -3,21 +3,36 @@ using System.Text.Json;
 namespace ImmichAutoUploader.Core.Services;
 
 /// <summary>
-/// Triggers a Jellyfin library refresh after a successful upload batch so new
-/// photos show up without a manual scan.
+/// Provides post-upload media library synchronization with a Jellyfin media server.
 /// <para/>
-/// Auth uses the <c>Authorization: MediaBrowser Token="…"</c> header — the
-/// <c>?api_key=</c> and <c>X-Emby-Token</c> variants return 401 on this instance.
-/// <para/>
-/// Failures are logged, never thrown: a Jellyfin hiccup must not fail uploads.
+/// <b>Authentication &amp; Resilience Details:</b>
+/// <list type="bullet">
+///   <item><description>Requests authenticate using the required <c>Authorization: MediaBrowser Token="..."</c> header format.</description></item>
+///   <item><description>Uses a shared, socket-pooled <see cref="HttpClient"/> with a 15-minute connection lifetime to prevent socket exhaustion.</description></item>
+///   <item><description>All network and parsing exceptions are logged as warnings and never propagate, ensuring media server hiccups never fail uploads.</description></item>
+/// </list>
 /// </summary>
 public static class JellyfinService
 {
+    /// <summary>
+    /// Reusable HTTP client instance configured with connection pooling and a 30-second timeout.
+    /// </summary>
     private static readonly HttpClient SharedClient = new(new SocketsHttpHandler
     {
         PooledConnectionLifetime = TimeSpan.FromMinutes(15)
     }) { Timeout = TimeSpan.FromSeconds(30) };
 
+    /// <summary>
+    /// Asynchronously requests a library refresh on the configured Jellyfin server.
+    /// </summary>
+    /// <param name="baseUrl">The base URL of the Jellyfin server (e.g. <c>https://jellyfin.example.com</c>).</param>
+    /// <param name="apiKey">The Jellyfin API token.</param>
+    /// <param name="libraryName">
+    /// The exact name of the media library to refresh (e.g., "Photos").
+    /// If null or whitespace, a full server library scan (<c>POST /Library/Refresh</c>) is initiated.
+    /// </param>
+    /// <param name="ct">A cancellation token for the HTTP operation.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     public static async Task TriggerRefreshAsync(
         string baseUrl, string apiKey, string libraryName, CancellationToken ct = default)
     {
@@ -58,6 +73,15 @@ public static class JellyfinService
         }
     }
 
+    /// <summary>
+    /// Queries the Jellyfin server's media folders to resolve a library's unique identifier by its display name.
+    /// </summary>
+    /// <param name="http">The HTTP client to use for the request.</param>
+    /// <param name="baseUrl">The normalized base URL of the Jellyfin server.</param>
+    /// <param name="apiKey">The Jellyfin API token.</param>
+    /// <param name="libraryName">The display name of the library to match.</param>
+    /// <param name="ct">A cancellation token for the HTTP request.</param>
+    /// <returns>The string identifier of the matching library, or <c>null</c> if not found or if the request fails.</returns>
     internal static async Task<string?> FindLibraryIdAsync(
         HttpClient http, string baseUrl, string apiKey, string libraryName, CancellationToken ct)
     {

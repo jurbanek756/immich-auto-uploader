@@ -1,8 +1,15 @@
 namespace ImmichAutoUploader.Core.Services;
 
 /// <summary>
-/// One immich-go invocation for a single file.
+/// Represents the parameters required to execute a single-file upload using <c>immich-go</c>.
 /// </summary>
+/// <param name="ExePath">The absolute path to the <c>immich-go.exe</c> binary.</param>
+/// <param name="ServerUrl">The destination Immich server URL.</param>
+/// <param name="ApiKey">The Immich API key (passed via environment variable <c>IMMICH_API_KEY</c>).</param>
+/// <param name="AdminApiKey">Optional Immich admin API key (passed via environment variable <c>IMMICH_ADMIN_API_KEY</c>).</param>
+/// <param name="PauseJobs">Whether to pause server background jobs during upload.</param>
+/// <param name="DeviceUuid">The unique, stable device identifier sent via <c>--device-uuid</c>.</param>
+/// <param name="FilePath">The absolute path to the media file being uploaded.</param>
 public sealed record UploadRequest(
     string ExePath,
     string ServerUrl,
@@ -12,41 +19,57 @@ public sealed record UploadRequest(
     string DeviceUuid,
     string FilePath);
 
+/// <summary>
+/// Encapsulates the execution outcome of an <c>immich-go</c> process.
+/// </summary>
+/// <param name="Success"><c>true</c> if the process completed with exit code 0; otherwise, <c>false</c>.</param>
+/// <param name="ExitCode">The process exit code (0 for success, non-zero for errors, -1 for timeouts or start failures).</param>
+/// <param name="ErrorDetail">Diagnostic error details captured from standard error or standard output.</param>
 public sealed record UploadResult(bool Success, int ExitCode, string ErrorDetail);
 
 /// <summary>
-/// Runs the bundled immich-go, one file per process.
+/// Manages execution of the bundled <c>immich-go</c> CLI binary, maintaining strict per-file process isolation.
 /// <para/>
-/// Per-file (rather than one run per batch over a staging dir) is deliberate:
-/// attribution is exact — exit code 0 means this file is in Immich (uploaded
-/// or already-exists), anything else is a failure for this file only. One bad
-/// file can never take down the rest of the batch, which was the original pain.
+/// <b>Architectural Rationale:</b>
+/// Executing one process per file (rather than running against a staging directory) guarantees exact attribution:
+/// exit code 0 deterministically proves that this specific file is safely in Immich (newly ingested or existing).
+/// A non-zero exit code represents a failure for that single file only. A corrupted photo or unsupported video
+/// codec can never cause an entire batch to abort.
 /// <para/>
-/// <c>--on-errors stop</c> is always used internally so a failed file surfaces
-/// as a non-zero exit; the app-level OnErrors setting ("continue"/"stop") is
-/// applied by the engine across files instead.
-/// <para/>
-/// Secrets: IMMICH_API_KEY and IMMICH_ADMIN_API_KEY are passed via environment variables to protect them
-/// from process listing and event log auditing.
+/// <b>Security:</b>
+/// <c>IMMICH_API_KEY</c> and <c>IMMICH_ADMIN_API_KEY</c> are passed via process environment variables rather
+/// than command-line arguments, shielding them from Task Manager, Process Explorer, and Windows Event ID 4688 logs.
 /// </summary>
 public static class ImmichGoRunner
 {
-    private const int PerFileTimeoutMs = 30 * 60 * 1000; // hung uploads must not linger forever
+    /// <summary>
+    /// Maximum allowed execution time for a single file upload (30 minutes) before the process is killed.
+    /// Prevents hung network connections or stalled child processes from blocking workers indefinitely.
+    /// </summary>
+    private const int PerFileTimeoutMs = 30 * 60 * 1000;
 
+    /// <summary>
+    /// Spawns an <c>immich-go</c> child process to upload a single file and awaits its completion.
+    /// </summary>
+    /// <param name="req">The upload execution parameters.</param>
+    /// <param name="ct">A cancellation token that can abort execution and terminate the child process tree.</param>
+    /// <returns>An <see cref="UploadResult"/> indicating success or containing failure details.</returns>
+    /// <exception cref="OperationCanceledException">Thrown when <paramref name="ct"/> is cancelled.</exception>
     public static async Task<UploadResult> UploadSingleAsync(UploadRequest req, CancellationToken ct = default)
     {
         var args = new List<string>
         {
             "upload",
             "--server", req.ServerUrl,
-            "--on-errors", "stop",
-            "--concurrent-tasks", "1",
+            "--on-errors", "stop", // Force non-zero exit on file failure so the engine detects it
+            "--concurrent-tasks", "1", // Concurrency is managed at the process level by UploadEngine
             "--pause-immich-jobs", req.PauseJobs ? "true" : "false",
             "--device-uuid", req.DeviceUuid,
             "--log-level", "WARN",
             req.FilePath
         };
 
+        // Pass secrets via environment variables to avoid command-line argument exposure
         var env = new Dictionary<string, string>
         {
             ["IMMICH_API_KEY"] = req.ApiKey

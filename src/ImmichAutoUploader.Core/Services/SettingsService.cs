@@ -4,8 +4,10 @@ using ImmichAutoUploader.Core.Models;
 namespace ImmichAutoUploader.Core.Services;
 
 /// <summary>
-/// Loads/saves non-secret settings as JSON in %AppData%\ImmichAutoUploader\settings.json.
-/// Secrets (API keys) are handled separately by <see cref="Security.ICredentialStore"/>.
+/// Manages serialization and deserialization of non-secret application settings to and from
+/// <c>%AppData%\ImmichAutoUploader\settings.json</c>.
+/// <para/>
+/// Sensitive credentials (API keys) are excluded and managed by <see cref="Security.ICredentialStore"/>.
 /// </summary>
 public sealed class SettingsService
 {
@@ -15,17 +17,34 @@ public sealed class SettingsService
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     };
 
+    /// <summary>
+    /// Gets the standard file system path for application settings in the user's AppData directory.
+    /// </summary>
     public static string DefaultSettingsPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "ImmichAutoUploader", "settings.json");
 
+    /// <summary>
+    /// Gets the active file path targeted by this service instance.
+    /// </summary>
     public string SettingsPath { get; }
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="SettingsService"/> class.
+    /// </summary>
+    /// <param name="customPath">Optional custom file path for settings. If null, <see cref="DefaultSettingsPath"/> is used.</param>
     public SettingsService(string? customPath = null)
     {
         SettingsPath = customPath ?? DefaultSettingsPath;
     }
 
+    /// <summary>
+    /// Reads and deserializes application settings from disk.
+    /// </summary>
+    /// <returns>
+    /// The loaded <see cref="AppSettings"/> instance, or a new instance with default values
+    /// if the file does not exist or cannot be deserialized.
+    /// </returns>
     public AppSettings Load()
     {
         try
@@ -40,11 +59,15 @@ public sealed class SettingsService
         }
         catch
         {
-            // Corrupt settings file: fall through to defaults rather than crashing.
+            // Corrupt or inaccessible settings file: fall through to defaults rather than crashing.
         }
         return new AppSettings();
     }
 
+    /// <summary>
+    /// Serializes and writes application settings to disk using an atomic temporary-file swap.
+    /// </summary>
+    /// <param name="settings">The <see cref="AppSettings"/> instance to persist.</param>
     public void Save(AppSettings settings)
     {
         string? dir = Path.GetDirectoryName(SettingsPath);

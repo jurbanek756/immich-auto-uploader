@@ -5,11 +5,14 @@ using Microsoft.Data.Sqlite;
 namespace ImmichAutoUploader.Core.Services;
 
 /// <summary>
-/// SQLite-backed persistent upload queue.
+/// Provides a persistent, thread-safe SQLite-backed queue for media ingestion and deduplication.
 /// <para/>
-/// Deduplication is by SHA-256 content hash, so re-adding the same photo (even under
-/// a different name or after an app restart) never creates a duplicate upload.
-/// A separate <c>uploaded</c> table remembers every finished hash permanently.
+/// <b>Concurrency &amp; Thread-Safety Guarantees:</b>
+/// <list type="bullet">
+///   <item><description><b>Serialized SQLite Access:</b> All database operations (reads, writes, transactions) are strictly serialized through an internal synchronization object (<c>_lock</c>). SQLite connections in Microsoft.Data.Sqlite are not thread-safe; this pattern guarantees thread safety across concurrent caller threads.</description></item>
+///   <item><description><b>Unlocked Content Hashing:</b> Heavy SHA-256 disk streaming in <see cref="TryEnqueueAsync"/> executes asynchronously <i>outside</i> the database lock, preventing I/O operations from blocking other database queries.</description></item>
+///   <item><description><b>High-Performance WAL Mode:</b> Configured with <c>PRAGMA journal_mode = WAL</c> and <c>PRAGMA synchronous = NORMAL</c> to provide crash resilience while minimizing disk write overhead.</description></item>
+/// </list>
 /// </summary>
 public sealed class UploadQueue : IDisposable
 {
@@ -17,10 +20,18 @@ public sealed class UploadQueue : IDisposable
     private readonly object _lock = new();
     private bool _disposed;
 
+    /// <summary>
+    /// Gets the standard file path for the SQLite queue database in the user's AppData directory.
+    /// </summary>
     public static string DefaultDbPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "ImmichAutoUploader", "upload-queue.db");
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="UploadQueue"/> class, opening the SQLite connection
+    /// and executing schema migrations.
+    /// </summary>
+    /// <param name="dbPath">The absolute file path to the SQLite database file.</param>
     public UploadQueue(string dbPath)
     {
         string? dir = Path.GetDirectoryName(dbPath);
@@ -39,6 +50,9 @@ public sealed class UploadQueue : IDisposable
         InitializeSchema();
     }
 
+    /// <summary>
+    /// Creates required database tables and indices if they do not exist, and applies schema migrations.
+    /// </summary>
     private void InitializeSchema()
     {
         lock (_lock)
@@ -68,7 +82,7 @@ public sealed class UploadQueue : IDisposable
             cmd.ExecuteNonQuery();
         }
 
-        // Migration (phase 3): retry backoff timestamp. Older DBs lack the column.
+        // Schema Migration: Ensure 'next_retry_at' column exists on databases created with earlier versions.
         lock (_lock)
         {
             bool hasRetryColumn = false;
@@ -102,6 +116,20 @@ public sealed class UploadQueue : IDisposable
     // Enqueue (with validation + dedup). Hashing happens outside the lock.
     // ------------------------------------------------------------------
 
+    /// <summary>
+    /// Computes the SHA-256 hash of a media file and attempts to insert it into the queue.
+    /// <para/>
+    /// <b>Deduplication Logic:</b>
+    /// <list type="bullet">
+    ///   <item><description>If the hash exists in <c>uploaded</c>, skips insertion (<see cref="EnqueueResult.AlreadyUploaded"/>).</description></item>
+    ///   <item><description>If the hash is in <c>queue</c> under the same path, skips insertion (<see cref="EnqueueResult.AlreadyQueued"/>).</description></item>
+    ///   <item><description>If the hash is in <c>queue</c> under a path that no longer exists (e.g. file was renamed), updates the path.</description></item>
+    ///   <item><description>Otherwise, inserts a new <c>Pending</c> row.</description></item>
+    /// </list>
+    /// </summary>
+    /// <param name="sourcePath">The absolute path to the media file.</param>
+    /// <param name="ct">A cancellation token for async hashing.</param>
+    /// <returns>An <see cref="EnqueueResult"/> indicating the intake outcome.</returns>
     public async Task<EnqueueResult> TryEnqueueAsync(string sourcePath, CancellationToken ct = default)
     {
         if (FileWatcherService.IsTempFile(sourcePath))
@@ -122,6 +150,7 @@ public sealed class UploadQueue : IDisposable
         if (size == 0)
             return EnqueueResult.SkippedEmptyFile;
 
+        // Perform SHA-256 hashing outside the database lock to avoid blocking readers/writers
         string hash = await ComputeHashAsync(sourcePath, ct).ConfigureAwait(false);
 
         long? existingId = null;
@@ -144,6 +173,7 @@ public sealed class UploadQueue : IDisposable
             }
         }
 
+        // If the hash is already in the queue, check if the previous file still exists
         if (existingId.HasValue && existingPath is not null)
         {
             if (string.Equals(existingPath, sourcePath, StringComparison.OrdinalIgnoreCase))
@@ -155,6 +185,7 @@ public sealed class UploadQueue : IDisposable
 
             if (!oldFileExists)
             {
+                // File was renamed or moved: update the queue record to the new path
                 lock (_lock)
                 {
                     ThrowIfDisposed();
@@ -191,6 +222,9 @@ public sealed class UploadQueue : IDisposable
         }
     }
 
+    /// <summary>
+    /// Checks whether the specified SHA-256 hash exists in the permanent <c>uploaded</c> table.
+    /// </summary>
     private bool ExistsInUploaded(string hash)
     {
         using var cmd = _conn.CreateCommand();
@@ -199,6 +233,9 @@ public sealed class UploadQueue : IDisposable
         return cmd.ExecuteScalar() is not null;
     }
 
+    /// <summary>
+    /// Computes the uppercase hex-encoded SHA-256 digest of a file using an 80 KB async buffer.
+    /// </summary>
     private static async Task<string> ComputeHashAsync(string path, CancellationToken ct)
     {
         using var sha = SHA256.Create();
@@ -209,9 +246,15 @@ public sealed class UploadQueue : IDisposable
     }
 
     // ------------------------------------------------------------------
-    // Dequeue / completion (used by the phase-3 upload engine)
+    // Dequeue / completion
     // ------------------------------------------------------------------
 
+    /// <summary>
+    /// Dequeues up to <paramref name="maxCount"/> files ready for upload (status <c>Pending</c> or <c>Failed</c> with expired backoff),
+    /// atomically transitioning their status to <c>Uploading</c>.
+    /// </summary>
+    /// <param name="maxCount">The maximum number of items to dequeue.</param>
+    /// <returns>A list of dequeued <see cref="QueuedFile"/> items.</returns>
     public IReadOnlyList<QueuedFile> DequeueBatch(int maxCount)
     {
         lock (_lock)
@@ -259,8 +302,8 @@ public sealed class UploadQueue : IDisposable
     }
 
     /// <summary>
-    /// How many queue rows are currently due for upload (Pending or Failed with expired backoff).
-    /// Lets the engine skip the Tailscale hook entirely when there is nothing to do.
+    /// Returns the count of queue items currently eligible for upload (<c>Pending</c> or <c>Failed</c> with expired backoff).
+    /// Used by <see cref="UploadEngine"/> to skip unnecessary Tailscale connections when the queue has no due work.
     /// </summary>
     public int CountDue()
     {
@@ -274,6 +317,11 @@ public sealed class UploadQueue : IDisposable
         }
     }
 
+    /// <summary>
+    /// Records a successful upload in the permanent <c>uploaded</c> audit table and removes the item from <c>queue</c>.
+    /// </summary>
+    /// <param name="id">The queue record ID.</param>
+    /// <param name="immichAssetId">Optional asset ID returned by Immich.</param>
     public void MarkUploaded(long id, string? immichAssetId = null)
     {
         lock (_lock)
@@ -324,9 +372,10 @@ public sealed class UploadQueue : IDisposable
     }
 
     /// <summary>
-    /// Reverts files that were dequeued as 'Uploading' back to 'Pending'
-    /// if a batch was interrupted, cancelled, or stopped on error.
+    /// Reverts dequeued items whose status is <c>Uploading</c> back to <c>Pending</c>.
+    /// Called when an active batch is cancelled, stopped on error, or interrupted.
     /// </summary>
+    /// <param name="ids">Collection of queue record IDs to revert.</param>
     public void RevertToPending(IEnumerable<long> ids)
     {
         var idList = ids.ToList();
@@ -342,6 +391,16 @@ public sealed class UploadQueue : IDisposable
         }
     }
 
+    /// <summary>
+    /// Marks a queue item as <c>Failed</c>, increments its attempt counter, records the error detail,
+    /// and calculates an exponential backoff timestamp for <c>next_retry_at</c>.
+    /// <para/>
+    /// <b>Backoff Formula:</b>
+    /// <c>delayMinutes = min(5 * 2^(attempts - 1), 240)</c>
+    /// Resulting schedule: 5m, 10m, 20m, 40m, 80m, 160m, 240m (capped).
+    /// </summary>
+    /// <param name="id">The queue record ID.</param>
+    /// <param name="error">Diagnostic error message.</param>
     public void MarkFailed(long id, string error)
     {
         lock (_lock)
@@ -358,7 +417,7 @@ public sealed class UploadQueue : IDisposable
             }
             attempts++;
 
-            // Exponential backoff: 5, 10, 20, 40, 80 … capped at 240 minutes.
+            // Exponential backoff: 5, 10, 20, 40, 80, 160... capped at 240 minutes (4 hours).
             int delayMinutes = (int)Math.Min(5 * Math.Pow(2, attempts - 1), 240);
             string nextRetry = DateTime.UtcNow.AddMinutes(delayMinutes).ToString("o");
 
@@ -375,7 +434,11 @@ public sealed class UploadQueue : IDisposable
         }
     }
 
-    /// <summary>Move failed items back to Pending for another attempt.</summary>
+    /// <summary>
+    /// Resets all <c>Failed</c> queue items back to <c>Pending</c> and clears their backoff timestamps,
+    /// making them immediately eligible for the next batch run.
+    /// </summary>
+    /// <returns>The number of items reset.</returns>
     public int RequeueFailed()
     {
         lock (_lock)
@@ -389,9 +452,12 @@ public sealed class UploadQueue : IDisposable
     }
 
     /// <summary>
-    /// Crash recovery: anything left "Uploading" when the app starts goes back to Pending.
-    /// Call once at startup.
+    /// Crash Recovery: Identifies any queue items left in <c>Uploading</c> status from a previous process
+    /// crash or unexpected system reboot, resetting them to <c>Pending</c> and clearing <c>next_retry_at</c>.
+    /// <para/>
+    /// Must be invoked once during application startup prior to launching <see cref="UploadEngine"/>.
     /// </summary>
+    /// <returns>The number of recovered items.</returns>
     public int ResetStuckUploading()
     {
         lock (_lock)
@@ -404,6 +470,10 @@ public sealed class UploadQueue : IDisposable
         }
     }
 
+    /// <summary>
+    /// Queries current aggregate statistics across queue tables.
+    /// </summary>
+    /// <returns>A tuple containing counts for <c>(Pending, Uploading, Uploaded, Failed)</c>.</returns>
     public (int Pending, int Uploading, int Uploaded, int Failed) GetStats()
     {
         lock (_lock)
@@ -425,8 +495,9 @@ public sealed class UploadQueue : IDisposable
     }
 
     /// <summary>
-    /// Drop a queue row entirely (e.g. the source file was deleted before upload).
+    /// Permanently deletes a queue record by its identifier (e.g., if the source file was deleted before upload).
     /// </summary>
+    /// <param name="id">The queue record ID to delete.</param>
     public void Remove(long id)
     {
         lock (_lock)
@@ -439,6 +510,9 @@ public sealed class UploadQueue : IDisposable
         }
     }
 
+    /// <summary>
+    /// Closes and disposes the SQLite connection.
+    /// </summary>
     public void Dispose()
     {
         lock (_lock)
