@@ -25,7 +25,12 @@ public sealed class DpapiCredentialStore : ICredentialStore
     /// </summary>
     /// <param name="name">The unique credential slot name.</param>
     /// <returns>The path ending in <c>.bin</c> within <see cref="SecretsDir"/>.</returns>
-    private static string PathFor(string name) => Path.Combine(SecretsDir, name + ".bin");
+    private static string PathFor(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name) || Path.GetFileName(name) != name)
+            throw new ArgumentException("Invalid credential slot name.", nameof(name));
+        return Path.Combine(SecretsDir, name + ".bin");
+    }
 
     /// <summary>
     /// Encrypts the provided secret using Windows DPAPI and atomically writes it to disk.

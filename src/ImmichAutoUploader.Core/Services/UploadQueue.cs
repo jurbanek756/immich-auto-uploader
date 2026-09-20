@@ -71,18 +71,18 @@ public sealed class UploadQueue : IDisposable
                     detected_at   TEXT NOT NULL,
                     updated_at    TEXT NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_queue_status ON queue(status);
                 CREATE TABLE IF NOT EXISTS uploaded (
                     file_hash       TEXT PRIMARY KEY,
                     source_path     TEXT NOT NULL,
                     uploaded_at     TEXT NOT NULL,
                     immich_asset_id TEXT
                 );
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_hash_unique ON queue(file_hash);";
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_hash_unique ON queue(file_hash);
+                CREATE INDEX IF NOT EXISTS idx_queue_source_path ON queue(source_path);";
             cmd.ExecuteNonQuery();
         }
 
-        // Schema Migration: Ensure 'next_retry_at' column exists on databases created with earlier versions.
+        // Schema Migration: Ensure 'next_retry_at' column and performance indices exist on databases created with earlier versions.
         lock (_lock)
         {
             bool hasRetryColumn = false;
@@ -107,7 +107,9 @@ public sealed class UploadQueue : IDisposable
             }
 
             using var idxCmd = _conn.CreateCommand();
-            idxCmd.CommandText = "CREATE INDEX IF NOT EXISTS idx_queue_status_retry_detected ON queue(status, next_retry_at, detected_at);";
+            idxCmd.CommandText = @"
+                CREATE INDEX IF NOT EXISTS idx_queue_status_retry_detected ON queue(status, next_retry_at, detected_at);
+                CREATE INDEX IF NOT EXISTS idx_queue_source_path ON queue(source_path);";
             idxCmd.ExecuteNonQuery();
         }
     }
@@ -151,7 +153,15 @@ public sealed class UploadQueue : IDisposable
             return EnqueueResult.SkippedEmptyFile;
 
         // Perform SHA-256 hashing outside the database lock to avoid blocking readers/writers
-        string hash = await ComputeHashAsync(sourcePath, ct).ConfigureAwait(false);
+        string hash;
+        try
+        {
+            hash = await ComputeHashAsync(sourcePath, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException or UnauthorizedAccessException)
+        {
+            return EnqueueResult.FileNotFound;
+        }
 
         long? existingHashId = null;
         string? existingHashPath = null;
@@ -328,7 +338,7 @@ public sealed class UploadQueue : IDisposable
                     Status = reader.GetString(4),
                     Attempts = reader.GetInt32(5),
                     LastError = reader.IsDBNull(6) ? null : reader.GetString(6),
-                    DetectedAt = DateTime.Parse(reader.GetString(7)),
+                    DetectedAt = DateTime.Parse(reader.GetString(7), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind),
                 });
             }
             reader.Close();

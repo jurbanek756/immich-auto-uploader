@@ -14,7 +14,7 @@ public sealed class AppSettings
     /// <summary>
     /// Gets or sets the primary base URL of the Immich server (e.g., <c>https://immich.example.com</c>).
     /// </summary>
-    public string ImmichUrl { get; set; } = "https://immich.turbaneks.duckdns.org";
+    public string ImmichUrl { get; set; } = "http://localhost:2283";
 
     // ---- Folders ----
 

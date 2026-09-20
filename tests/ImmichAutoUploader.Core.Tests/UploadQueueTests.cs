@@ -305,4 +305,23 @@ public class UploadQueueTests : IDisposable
         Assert.Equal(1, stats.Uploaded);
         Assert.Equal(1, stats.Failed);
     }
+
+    [Fact]
+    public async Task TryEnqueueAsync_NonExistentFile_ReturnsFileNotFound()
+    {
+        string nonExistent = Path.Combine(_tempTestDir, "ghost.jpg");
+        var result = await _queue.TryEnqueueAsync(nonExistent);
+        Assert.Equal(EnqueueResult.FileNotFound, result);
+    }
+
+    [Fact]
+    public async Task DequeueBatch_PreservesUtcDateTimeKindOnDetectedAt()
+    {
+        string file = CreateTempMediaFile("utc_check.jpg", new byte[] { 99, 98 });
+        await _queue.TryEnqueueAsync(file);
+
+        var batch = _queue.DequeueBatch(1);
+        Assert.Single(batch);
+        Assert.Equal(DateTimeKind.Utc, batch[0].DetectedAt.Kind);
+    }
 }
