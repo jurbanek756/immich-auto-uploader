@@ -74,9 +74,10 @@ For full technical specifications, database schema diagrams, and threading guara
 
 ### Option 1: Download Pre-Built Release
 1. Go to the [Releases](https://github.com/jurbanek756/immich-auto-uploader/releases) page.
-2. Download the latest `ImmichAutoUploader-vX.Y.Z-win-x64.zip`.
-3. Extract the archive to any folder (e.g. `C:\Program Files\ImmichAutoUploader` or `%LocalAppData%\Programs\ImmichAutoUploader`).
-4. Launch `ImmichAutoUploader.exe`. The application opens its settings window on first run.
+2. Download the latest release:
+   - **Installer (Recommended)**: `ImmichAutoUploader-vX.Y.Z-Setup.exe` — standard Windows setup wizard that creates shortcuts and an uninstaller.
+   - **Portable**: `ImmichAutoUploader-vX.Y.Z-win-x64.zip` — extract anywhere and run directly.
+3. Launch `ImmichAutoUploader.exe`. The application opens its settings window on first run.
 
 ### Option 2: Building from Source
 

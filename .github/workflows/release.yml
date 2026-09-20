@@ -43,8 +43,28 @@ jobs:
           $tag = "${{ github.ref_name }}"
           Compress-Archive -Path publish/* -DestinationPath "ImmichAutoUploader-$tag-win-x64.zip"
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress
+
+      - name: Build Inno Setup installer
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $iscc = if (Get-Command iscc -ErrorAction SilentlyContinue) {
+            "iscc"
+          } elseif (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") {
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          } else {
+            throw "ISCC compiler not found."
+          }
+          & $iscc /DAppVersion="$tag" installer.iss
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ImmichAutoUploader-*-win-x64.zip
+          files: |
+            ImmichAutoUploader-*-win-x64.zip
+            ImmichAutoUploader-*-Setup.exe
           generate_release_notes: true

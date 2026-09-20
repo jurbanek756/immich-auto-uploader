@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v1.0.1] - 2026-09-20
+
+### Added
+- **Bundled Windows Installer**:
+  - Inno Setup script (`installer.iss`) creating a unified `ImmichAutoUploader-<version>-Setup.exe` installer with Start Menu shortcuts, optional Desktop shortcut, and Windows uninstaller.
+  - Automated installer compilation in GitHub Actions release workflow publishing both the `.exe` installer and `.zip` archive.
+
 ## [v1.0.0] - 2026-09-20
 
 ### Added
