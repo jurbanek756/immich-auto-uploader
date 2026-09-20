@@ -185,8 +185,9 @@ public static class TailscaleService
         {
             var r = await ProcessHelper.RunAsync(exePath, new[] { "status" }, 15_000, ct).ConfigureAwait(false);
             string text = r.StdOut + r.StdErr;
-            if (text.Contains("Logged out", StringComparison.OrdinalIgnoreCase))
-                return ("LoggedOut", ExtractLoginUrl(text));
+            string? loginUrl = ExtractLoginUrl(text);
+            if (loginUrl is not null || text.Contains("Logged out", StringComparison.OrdinalIgnoreCase))
+                return ("LoggedOut", loginUrl);
             if (r.ExitCode == 0)
                 return ("Running", null); // best-effort guess
         }

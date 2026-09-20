@@ -25,8 +25,19 @@ public class ProcessHelperTests
             1_500);
 
         Assert.True(result.TimedOut);
+        Assert.Equal(-1, result.ExitCode);
         Assert.Contains("TailscaleLoginUrlSimulated", result.StdOut);
         Assert.Contains("https://login.tailscale.com/a/test1234", result.StdOut);
+    }
+
+    [Fact]
+    public async Task RunAsync_NonExistentExecutable_ReturnsExitCodeMinusOneWithoutThrowing()
+    {
+        var result = await ProcessHelper.RunAsync("non_existent_executable_12345.exe", Array.Empty<string>(), 5_000);
+
+        Assert.Equal(-1, result.ExitCode);
+        Assert.False(result.TimedOut);
+        Assert.Contains("Failed to start process", result.StdErr);
     }
 
     [Fact]

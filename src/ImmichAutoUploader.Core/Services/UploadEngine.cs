@@ -427,6 +427,9 @@ public sealed class UploadEngine : IDisposable
             {
                 try
                 {
+                    if (!copySucceeded)
+                        target = DedupePath(dest);
+
                     // Check whether source and target share the same drive volume
                     bool isCrossVolume = !string.Equals(
                         Path.GetPathRoot(Path.GetFullPath(sourcePath)),
@@ -481,7 +484,7 @@ public sealed class UploadEngine : IDisposable
     {
         if (!File.Exists(dest))
             return dest;
-        string dir = Path.GetDirectoryName(dest)!;
+        string dir = Path.GetDirectoryName(dest) ?? string.Empty;
         string name = Path.GetFileNameWithoutExtension(dest);
         string ext = Path.GetExtension(dest);
         for (int i = 2; ; i++)
