@@ -324,4 +324,83 @@ public class UploadQueueTests : IDisposable
         Assert.Single(batch);
         Assert.Equal(DateTimeKind.Utc, batch[0].DetectedAt.Kind);
     }
+
+    [Fact]
+    public async Task TryEnqueueAsync_SamePathModifiedContent_ClashesWithAnotherQueuedFile_ResolvesClashWithoutConstraintException()
+    {
+        string fileA = CreateTempMediaFile("photoA.jpg", new byte[] { 1, 2, 3 });
+        string fileB = CreateTempMediaFile("photoB.jpg", new byte[] { 4, 5, 6 });
+
+        var resA = await _queue.TryEnqueueAsync(fileA);
+        var resB = await _queue.TryEnqueueAsync(fileB);
+        Assert.Equal(EnqueueResult.Enqueued, resA);
+        Assert.Equal(EnqueueResult.Enqueued, resB);
+
+        // Overwrite fileA with fileB's content (identical hash)
+        File.WriteAllBytes(fileA, new byte[] { 4, 5, 6 });
+
+        // Enqueuing fileA should resolve the clash cleanly without throwing SqliteException
+        var resClash = await _queue.TryEnqueueAsync(fileA);
+        Assert.Equal(EnqueueResult.AlreadyQueued, resClash);
+
+        var stats = _queue.GetStats();
+        Assert.Equal(1, stats.Pending);
+    }
+
+    [Fact]
+    public async Task RevertToPending_ResetsNextRetryAtToNull()
+    {
+        string file = CreateTempMediaFile("retry_revert.jpg", new byte[] { 7, 7, 7 });
+        await _queue.TryEnqueueAsync(file);
+
+        var batch = _queue.DequeueBatch(1);
+        _queue.MarkFailed(batch[0].Id, "Transient network failure");
+
+        // Expire retry delay
+        using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_tempDbPath}"))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE queue SET next_retry_at = $past WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$past", DateTime.UtcNow.AddMinutes(-1).ToString("o"));
+            cmd.Parameters.AddWithValue("$id", batch[0].Id);
+            cmd.ExecuteNonQuery();
+        }
+
+        // Dequeue for retry
+        var retryBatch = _queue.DequeueBatch(1);
+        Assert.Single(retryBatch);
+
+        // Revert to pending
+        _queue.RevertToPending(new[] { retryBatch[0].Id });
+
+        // Verify next_retry_at is now NULL
+        using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_tempDbPath}"))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT next_retry_at, status FROM queue WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$id", retryBatch[0].Id);
+            using var reader = cmd.ExecuteReader();
+            Assert.True(reader.Read());
+            Assert.True(reader.IsDBNull(0));
+            Assert.Equal("Pending", reader.GetString(1));
+        }
+    }
+
+    [Fact]
+    public async Task DequeueBatch_WithZeroOrNegativeCount_ReturnsEmpty()
+    {
+        string file = CreateTempMediaFile("zero_batch.jpg", new byte[] { 88 });
+        await _queue.TryEnqueueAsync(file);
+
+        var batch0 = _queue.DequeueBatch(0);
+        Assert.Empty(batch0);
+
+        var batchNeg = _queue.DequeueBatch(-5);
+        Assert.Empty(batchNeg);
+
+        var stats = _queue.GetStats();
+        Assert.Equal(1, stats.Pending);
+    }
 }

@@ -150,19 +150,27 @@ public partial class MainWindow : Window
             SetStatus("Max files per batch must be at least 1.");
             return;
         }
-        if (!string.IsNullOrWhiteSpace(TxtWatchFolder.Text) && !Directory.Exists(TxtWatchFolder.Text))
+        try
         {
-            SetStatus("Watch folder does not exist.");
-            return;
+            if (!string.IsNullOrWhiteSpace(TxtWatchFolder.Text) && !Directory.Exists(TxtWatchFolder.Text))
+            {
+                SetStatus("Watch folder does not exist.");
+                return;
+            }
+            if (!string.IsNullOrWhiteSpace(TxtWatchFolder.Text) &&
+                !string.IsNullOrWhiteSpace(TxtDoneFolder.Text) &&
+                string.Equals(
+                    Path.GetFullPath(TxtWatchFolder.Text).TrimEnd(Path.DirectorySeparatorChar),
+                    Path.GetFullPath(TxtDoneFolder.Text).TrimEnd(Path.DirectorySeparatorChar),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                SetStatus("Done folder must be different from the watch folder.");
+                return;
+            }
         }
-        if (!string.IsNullOrWhiteSpace(TxtWatchFolder.Text) &&
-            !string.IsNullOrWhiteSpace(TxtDoneFolder.Text) &&
-            string.Equals(
-                Path.GetFullPath(TxtWatchFolder.Text).TrimEnd(Path.DirectorySeparatorChar),
-                Path.GetFullPath(TxtDoneFolder.Text).TrimEnd(Path.DirectorySeparatorChar),
-                StringComparison.OrdinalIgnoreCase))
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
         {
-            SetStatus("Done folder must be different from the watch folder.");
+            SetStatus("Watch or Done folder contains an invalid path format.");
             return;
         }
 

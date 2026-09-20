@@ -105,7 +105,12 @@ public partial class App : System.Windows.Application
                 {
                     if (!timedOut)
                     {
-                        Dispatcher.Invoke(ShowSettings);
+                        try
+                        {
+                            if (!Dispatcher.HasShutdownStarted)
+                                Dispatcher.Invoke(ShowSettings);
+                        }
+                        catch { /* shutdown race */ }
                     }
                 },
                 null,

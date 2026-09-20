@@ -192,6 +192,21 @@ public sealed class UploadQueue : IDisposable
                     if (trackedStatus != "Uploading")
                     {
                         reader.Close();
+
+                        // Check if the updated content hash is already tracked under another queue entry
+                        using var clashCmd = _conn.CreateCommand();
+                        clashCmd.CommandText = "SELECT id FROM queue WHERE file_hash = $hash AND id != $id LIMIT 1;";
+                        clashCmd.Parameters.AddWithValue("$hash", hash);
+                        clashCmd.Parameters.AddWithValue("$id", pathId);
+                        if (clashCmd.ExecuteScalar() is not null)
+                        {
+                            using var deleteCmd = _conn.CreateCommand();
+                            deleteCmd.CommandText = "DELETE FROM queue WHERE id = $id;";
+                            deleteCmd.Parameters.AddWithValue("$id", pathId);
+                            deleteCmd.ExecuteNonQuery();
+                            return EnqueueResult.AlreadyQueued;
+                        }
+
                         using var updateCmd = _conn.CreateCommand();
                         updateCmd.CommandText = @"
                             UPDATE queue 
@@ -312,6 +327,9 @@ public sealed class UploadQueue : IDisposable
     /// <returns>A list of dequeued <see cref="QueuedFile"/> items.</returns>
     public IReadOnlyList<QueuedFile> DequeueBatch(int maxCount)
     {
+        if (maxCount <= 0)
+            return Array.Empty<QueuedFile>();
+
         lock (_lock)
         {
             ThrowIfDisposed();
@@ -440,7 +458,7 @@ public sealed class UploadQueue : IDisposable
         {
             ThrowIfDisposed();
             using var cmd = _conn.CreateCommand();
-            cmd.CommandText = $"UPDATE queue SET status = 'Pending', updated_at = $now WHERE id IN ({string.Join(",", idList)}) AND status = 'Uploading';";
+            cmd.CommandText = $"UPDATE queue SET status = 'Pending', next_retry_at = NULL, updated_at = $now WHERE id IN ({string.Join(",", idList)}) AND status = 'Uploading';";
             cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
             cmd.ExecuteNonQuery();
         }

@@ -64,10 +64,16 @@ public static class ImmichGoRunner
             "--on-errors", "stop", // Force non-zero exit on file failure so the engine detects it
             "--concurrent-tasks", "1", // Concurrency is managed at the process level by UploadEngine
             "--pause-immich-jobs", req.PauseJobs ? "true" : "false",
-            "--device-uuid", req.DeviceUuid,
             "--log-level", "WARN",
-            req.FilePath
         };
+
+        if (!string.IsNullOrWhiteSpace(req.DeviceUuid))
+        {
+            args.Add("--device-uuid");
+            args.Add(req.DeviceUuid);
+        }
+
+        args.Add(req.FilePath);
 
         // Pass secrets via environment variables to avoid command-line argument exposure
         var env = new Dictionary<string, string>

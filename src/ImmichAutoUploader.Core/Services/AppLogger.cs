@@ -95,6 +95,11 @@ public static class AppLogger
         }
         catch
         {
+            // Reset _dirEnsured so that if the log directory was deleted externally, it will be recreated
+            lock (_lock)
+            {
+                _dirEnsured = false;
+            }
             // Never let logging failures take down the application.
         }
     }

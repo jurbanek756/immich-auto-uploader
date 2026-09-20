@@ -75,8 +75,15 @@ internal static class ProcessHelper
 
         try
         {
-            if (!process.Start())
-                return new Result(-1, string.Empty, "Failed to start process.", false);
+            try
+            {
+                if (!process.Start())
+                    return new Result(-1, string.Empty, "Failed to start process.", false);
+            }
+            catch (System.ComponentModel.Win32Exception ex)
+            {
+                return new Result(-1, string.Empty, $"Failed to start process: {ex.Message}", false);
+            }
 
             // Terminate the process tree if cancellation or timeout occurs
             using var _ = linkedCts.Token.Register(() =>
@@ -118,7 +125,7 @@ internal static class ProcessHelper
                 throw new OperationCanceledException(ct);
 
             bool timedOut = timeoutCts.IsCancellationRequested;
-            int exitCode = process.HasExited ? process.ExitCode : -1;
+            int exitCode = timedOut ? -1 : (process.HasExited ? process.ExitCode : -1);
             return new Result(exitCode, stdOut, stdErr, timedOut);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
