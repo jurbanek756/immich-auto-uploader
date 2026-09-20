@@ -69,6 +69,21 @@ dotnet publish src\ImmichAutoUploader.App -c Release -r win-x64 --self-contained
 > Note: the WPF project only builds on Windows. The Core library is plain `net10.0`
 > and builds anywhere.
 
+## Releases (GitHub only)
+
+Pushing a version tag to the **GitHub** remote triggers the `Release` workflow
+(`.github/workflows/release.yml`): it pins the latest immich-go, publishes a
+self-contained single-file `win-x64` build, and attaches
+`ImmichAutoUploader-<tag>-win-x64.zip` to a new GitHub Release.
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0   # origin = GitHub remote
+```
+
+The workflow file is inert on the self-hosted git server — no CI and no git
+hooks are installed there.
+
 ## Roadmap
 
 - **Phase 1** (this scaffold): solution, settings model, DPAPI credential storage,
