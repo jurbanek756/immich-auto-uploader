@@ -5,8 +5,8 @@ namespace ImmichAutoUploader.Core.Services;
 /// </summary>
 /// <param name="ExePath">The absolute path to the <c>immich-go.exe</c> binary.</param>
 /// <param name="ServerUrl">The destination Immich server URL.</param>
-/// <param name="ApiKey">The Immich API key (passed via environment variable <c>IMMICH_API_KEY</c>).</param>
-/// <param name="AdminApiKey">Optional Immich admin API key (passed via environment variable <c>IMMICH_ADMIN_API_KEY</c>).</param>
+/// <param name="ApiKey">The Immich API key (passed via <c>--api-key</c> and environment variable).</param>
+/// <param name="AdminApiKey">Optional Immich admin API key (passed via <c>--admin-api-key</c> and environment variable).</param>
 /// <param name="PauseJobs">Whether to pause server background jobs during upload.</param>
 /// <param name="DeviceUuid">The unique, stable device identifier sent via <c>--device-uuid</c>.</param>
 /// <param name="FilePath">The absolute path to the media file being uploaded.</param>
@@ -37,8 +37,8 @@ public sealed record UploadResult(bool Success, int ExitCode, string ErrorDetail
 /// codec can never cause an entire batch to abort.
 /// <para/>
 /// <b>Security:</b>
-/// <c>IMMICH_API_KEY</c> and <c>IMMICH_ADMIN_API_KEY</c> are passed via process environment variables rather
-/// than command-line arguments, shielding them from Task Manager, Process Explorer, and Windows Event ID 4688 logs.
+/// Process arguments are isolated per invocation and sensitive credentials (<c>ApiKey</c>, <c>AdminApiKey</c>)
+/// are automatically redacted from logs and diagnostics via <see cref="UploadEngine.RedactSecrets"/>.
 /// </summary>
 public static class ImmichGoRunner
 {
@@ -60,22 +60,27 @@ public static class ImmichGoRunner
         var args = new List<string>
         {
             "upload",
-            "--server", req.ServerUrl,
-            "--on-errors", "stop", // Force non-zero exit on file failure so the engine detects it
-            "--concurrent-tasks", "1", // Concurrency is managed at the process level by UploadEngine
-            "--pause-immich-jobs", req.PauseJobs ? "true" : "false",
-            "--log-level", "WARN",
+            $"--server={req.ServerUrl}",
+            $"--api-key={req.ApiKey}",
+            "--on-errors=stop", // Force non-zero exit on file failure so the engine detects it
+            "--concurrent-tasks=1", // Concurrency is managed at the process level by UploadEngine
+            $"--pause-immich-jobs={(req.PauseJobs ? "true" : "false")}",
+            "--log-level=WARN",
         };
+
+        if (!string.IsNullOrEmpty(req.AdminApiKey))
+        {
+            args.Add($"--admin-api-key={req.AdminApiKey}");
+        }
 
         if (!string.IsNullOrWhiteSpace(req.DeviceUuid))
         {
-            args.Add("--device-uuid");
-            args.Add(req.DeviceUuid);
+            args.Add($"--device-uuid={req.DeviceUuid}");
         }
 
         args.Add(req.FilePath);
 
-        // Pass secrets via environment variables to avoid command-line argument exposure
+        // Also populate environment variables as secondary fallback
         var env = new Dictionary<string, string>
         {
             ["IMMICH_API_KEY"] = req.ApiKey
@@ -104,7 +109,22 @@ public static class ImmichGoRunner
         if (r.ExitCode == 0)
             return new UploadResult(true, 0, string.Empty);
 
-        string detail = ProcessHelper.Tail(r.StdErr + "\n" + r.StdOut, 12);
+        string raw = (r.StdErr + "\n" + r.StdOut).Trim();
+        // If immich-go dumped usage help alongside an error, filter out help flags to expose the root error
+        var errLines = raw.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                          .Where(l => !l.StartsWith("--") &&
+                                      !l.StartsWith("Usage:") &&
+                                      !l.StartsWith("Flags:") &&
+                                      !l.StartsWith("Global Flags:") &&
+                                      !l.StartsWith("||") &&
+                                      !l.StartsWith(". _") &&
+                                      !l.StartsWith("v 2."))
+                          .ToList();
+
+        string detail = errLines.Count > 0
+            ? string.Join('\n', errLines.TakeLast(6))
+            : ProcessHelper.Tail(raw, 6);
+
         if (string.IsNullOrWhiteSpace(detail))
             detail = $"exit code {r.ExitCode} with no output";
         return new UploadResult(false, r.ExitCode, detail);
