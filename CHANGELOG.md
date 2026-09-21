@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v1.0.8] - 2026-09-20
+
+### Fixed
+- **Directory-Only CLI Intake & Single-File Staging**:
+  - Resolved `Total Assets: 0` upload failures caused by `immich-go` strictly requiring directories rather than individual file paths.
+  - Implemented ephemeral per-file staging directories in `ImmichGoRunner` using zero-cost NTFS hard links (instantaneous link creation with 0 additional disk usage), backed by symlink and copy fallbacks.
+  - Staging directories are prefixed with `$` so `FileWatcherService` automatically excludes them from directory monitoring.
+  - Staging containers are automatically deleted in a `finally` block following upload completion or failure.
+  - Added automatic detection and linking of sidecar metadata files (`.xmp`).
+- **Test Infrastructure**:
+  - Added unit test in `ImmichGoRunnerTests` verifying staging directory creation, execution isolation, and automatic cleanup.
+
+---
+
 ## [v1.0.7] - 2026-09-20
 
 ### Fixed
