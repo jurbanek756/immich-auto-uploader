@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v1.0.7] - 2026-09-20
+
+### Fixed
+- **CLI Parameter Passing & Authentication**:
+  - Explicitly passed `--api-key` and `--admin-api-key` command-line flags to `immich-go`. The CLI requires explicit arguments rather than relying solely on environment variables.
+  - Standardized argument format across all flags to `--flag=value` (`--server=...`, `--api-key=...`, `--admin-api-key=...`, `--pause-immich-jobs=...`, `--device-uuid=...`), eliminating boolean argument token splitting.
+- **Diagnostic Logging & Error Reporting**:
+  - Refined stderr and stdout error detail extraction in `ImmichGoRunner` to filter out `immich-go` usage and help banners, ensuring the root error message is surfaced cleanly in daily application logs.
+- **Test Infrastructure**:
+  - Added unit test coverage in `ImmichGoRunnerTests` verifying graceful failure handling and error detail propagation.
+
+---
+
 ## [v1.0.6] - 2026-09-20
 
 ### Fixed
